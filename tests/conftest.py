@@ -40,10 +40,14 @@ def make_message(
     kwargs: dict[str, Any] = {}
     if photo:
         kwargs["photo"] = (
-            PhotoSize(file_id=f"fid-{next(_file_ids)}", file_unique_id="u", width=1, height=1),
+            PhotoSize(
+                file_id=f"fid-{next(_file_ids)}", file_unique_id="u", width=1, height=1
+            ),
         )
     if document:
-        kwargs["document"] = TgDocument(file_id=f"fid-{next(_file_ids)}", file_unique_id="u")
+        kwargs["document"] = TgDocument(
+            file_id=f"fid-{next(_file_ids)}", file_unique_id="u"
+        )
 
     return Message(
         message_id=next(_ids),

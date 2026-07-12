@@ -84,7 +84,8 @@ class Button:
     def __post_init__(self) -> None:
         if self.style is not None and str(self.style) not in _BUTTON_STYLES:
             raise ValueError(
-                f"unknown button style {self.style!r}; expected one of {sorted(_BUTTON_STYLES)}"
+                f"unknown button style {self.style!r}; "
+                f"expected one of {sorted(_BUTTON_STYLES)}"
             )
 
     def to_ptb(self) -> InlineKeyboardButton:
@@ -112,7 +113,8 @@ def build_markup(keyboard: KeyboardLike) -> InlineKeyboardMarkup | None:
         return keyboard
 
     rows = [
-        [btn.to_ptb() if isinstance(btn, Button) else btn for btn in row] for row in keyboard
+        [btn.to_ptb() if isinstance(btn, Button) else btn for btn in row]
+        for row in keyboard
     ]
     if not rows:
         return None
@@ -307,7 +309,9 @@ class Delivery:
 
         return await self._send_text(chat_id, screen, **extra)
 
-    async def render(self, update: Update, screen: Screen, *, fresh: bool = False) -> Message:
+    async def render(
+        self, update: Update, screen: Screen, *, fresh: bool = False
+    ) -> Message:
         """Edit in place when the update came from an inline button, else reply."""
         query = update.callback_query
         message = query.message if query is not None else None
@@ -360,7 +364,9 @@ class Delivery:
                 chat_id=message.chat_id,
                 message_id=message.message_id,
                 reply_markup=screen.markup(),
-                link_preview_options=LinkPreviewOptions(is_disabled=not screen.link_preview),
+                link_preview_options=LinkPreviewOptions(
+                    is_disabled=not screen.link_preview
+                ),
                 **self._text_kwargs(screen),
                 **{**screen.extra, **extra},
             )

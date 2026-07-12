@@ -164,7 +164,9 @@ class Router:
 
     # -- traversal -------------------------------------------------------------
 
-    def walk(self, outer_middlewares: list[Middleware] | None = None) -> Iterator[Registration]:
+    def walk(
+        self, outer_middlewares: list[Middleware] | None = None
+    ) -> Iterator[Registration]:
         """Yield all registrations with accumulated middleware chains."""
         chain = [*(outer_middlewares or []), *self.middlewares]
         for reg in self.registrations:

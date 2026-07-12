@@ -17,7 +17,7 @@ FIELDS_KEY = "vitrine_fields"
 
 
 class KeyValueFormatter(logging.Formatter):
-    """``2026-07-11T12:00:00 INFO vitrine.update update.handled handler=start user=42 ms=13``"""
+    """``2026-07-11T12:00:00 INFO vitrine.update update.handled handler=start user=42 ms=13``"""  # noqa
 
     def __init__(self) -> None:
         super().__init__(

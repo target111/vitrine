@@ -80,4 +80,6 @@ async def sync_command_menus(
                     _bot_commands(scoped), scope=BotCommandScopeChat(chat_id=chat_id)
                 )
             except Exception as exc:  # a bad chat id must not break startup
-                logger.warning("could not set %r commands for chat %s: %s", scope, chat_id, exc)
+                logger.warning(
+                    "could not set %r commands for chat %s: %s", scope, chat_id, exc
+                )

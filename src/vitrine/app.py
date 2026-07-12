@@ -147,11 +147,15 @@ class Bot(Generic[P]):
 
     # -- lifecycle ---------------------------------------------------------------
 
-    def on_startup(self, fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    def on_startup(
+        self, fn: Callable[..., Awaitable[Any]]
+    ) -> Callable[..., Awaitable[Any]]:
         self._startup_hooks.append(fn)
         return fn
 
-    def on_shutdown(self, fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    def on_shutdown(
+        self, fn: Callable[..., Awaitable[Any]]
+    ) -> Callable[..., Awaitable[Any]]:
         self._shutdown_hooks.append(fn)
         return fn
 
@@ -196,7 +200,8 @@ class Bot(Generic[P]):
             raise ConfigurationError("Bot needs a token to build the PTB application")
 
         application = (
-            Application.builder()
+            Application
+            .builder()
             .token(self.token)
             .context_types(ContextTypes(context=self._context_type))
             .post_init(self._post_init)
@@ -265,12 +270,10 @@ class Bot(Generic[P]):
             wired.append((conv.build(dispatch, middlewares), 0))
         for handler, group in self.router.walk_raw():
             wired.append((handler, group))
-        wired.append(
-            (
-                CallbackQueryHandler(_answer_noop, pattern=lambda d: d == NOOP),
-                0,
-            )
-        )
+        wired.append((
+            CallbackQueryHandler(_answer_noop, pattern=lambda d: d == NOOP),
+            0,
+        ))
 
         return wired
 
@@ -291,9 +294,9 @@ class Bot(Generic[P]):
 
     async def _visible_scopes(self, update: Any, context: Any) -> set[str]:
         scopes = {"default"}
-        all_scopes = {reg.scope for reg in self._registrations if reg.kind == "command"} | set(
-            self._scope_chats
-        )
+        all_scopes = {
+            reg.scope for reg in self._registrations if reg.kind == "command"
+        } | set(self._scope_chats)
 
         principal: P | None = None
         if self.auth is not None:
@@ -328,7 +331,9 @@ class Bot(Generic[P]):
             query = getattr(update, "callback_query", None)
             if query is not None:
                 try:
-                    await query.answer("You are banned from using this bot.", show_alert=True)
+                    await query.answer(
+                        "You are banned from using this bot.", show_alert=True
+                    )
                 except Exception:  # noqa: BLE001
                     pass
             raise ApplicationHandlerStop
@@ -396,7 +401,7 @@ class Bot(Generic[P]):
             await inv.aclose()
 
     def run(self, *, allowed_updates: Any = Update.ALL_TYPES) -> None:
-        """Build and run with long polling. For webhooks, use ``build()`` and PTB directly."""
+        """Build and run with long polling. For webhooks, use ``build()`` and PTB directly."""  # noqa
         application = self.build()
         application.run_polling(allowed_updates=allowed_updates)
 

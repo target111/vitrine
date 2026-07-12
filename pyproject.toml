@@ -23,7 +23,7 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 96
+line-length = 92
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

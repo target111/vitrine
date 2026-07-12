@@ -241,7 +241,9 @@ async def fortune(fortunes: list[str]):
 
 @bot.callback(PageCB)
 async def paged_list(data: PageCB):
-    page = await Paginator(ListSource([f"Item #{i}" for i in range(1, 48)]), 7).page(data.page)
+    page = await Paginator(ListSource([f"Item #{i}" for i in range(1, 48)]), 7).page(
+        data.page
+    )
     doc = Md().heading(f"Items — page {page.number}/{page.pages}")
     for item in page.items:
         doc.bullet(item)
@@ -288,7 +290,9 @@ async def feedback_topic(state: FeedbackState, update):
 async def feedback_body(state: FeedbackState, update, user: Profile):
     state.body = update.effective_message.text
     return END, Screen(
-        text=Md().line("Thanks, ", bold(user.name), "! Filed under ", code(state.topic), ".")
+        text=Md().line(
+            "Thanks, ", bold(user.name), "! Filed under ", code(state.topic), "."
+        )
     )
 
 
