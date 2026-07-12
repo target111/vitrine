@@ -15,13 +15,16 @@ from conftest import FakeQuery, make_message, make_update
 def test_screen_is_a_value_object_no_update_needed():
     screen = Screen(
         text=Md().heading("Hi there!").line("choose ", bold("wisely")),
-        keyboard=[[Button("Go", callback="x"), Button("Docs", url="https://example.com")]],
+        keyboard=[
+            [Button("Go", callback="x"), Button("Docs", url="https://example.com")]
+        ],
     )
     text, parse_mode = screen.content()
     assert parse_mode == "MarkdownV2"
     assert text == "*Hi there\\!*\nchoose *wisely*"
 
     markup = screen.markup()
+    assert markup is not None
     assert markup.inline_keyboard[0][0].callback_data == "x"
     assert markup.inline_keyboard[0][1].url == "https://example.com"
 
@@ -36,6 +39,7 @@ def test_button_style_passes_through():
             ]
         ],
     ).markup()
+    assert markup is not None
     row = markup.inline_keyboard[0]
     assert row[0].style == "success"
     assert row[1].style == "danger"
@@ -44,7 +48,7 @@ def test_button_style_passes_through():
 
 def test_button_rejects_unknown_style():
     with pytest.raises(ValueError, match="unknown button style"):
-        Button("Bad", callback="x", style="blue")
+        Button("Bad", callback="x", style="blue")  # type: ignore[arg-type]
 
 
 def test_media_kind_detects_all_types():
@@ -118,7 +122,9 @@ async def test_failed_replacement_send_keeps_old_message(delivery, fake_bot):
     except BadRequest:
         pass
 
-    assert not fake_bot.calls_to("delete_message")  # never deleted without a replacement
+    assert not fake_bot.calls_to(
+        "delete_message"
+    )  # never deleted without a replacement
 
 
 async def test_media_to_media_edits_in_place(delivery, fake_bot):
@@ -142,7 +148,9 @@ async def test_file_id_cached_and_reused(delivery, fake_bot):
 async def test_rejected_file_id_triggers_one_reupload(delivery, fake_bot):
     photo = Photo(b"payload")
     await delivery.send(1, Screen(media=photo))  # populates the cache
-    fake_bot.fail_once("send_photo", BadRequest("Wrong file identifier/HTTP URL specified"))
+    fake_bot.fail_once(
+        "send_photo", BadRequest("Wrong file identifier/HTTP URL specified")
+    )
     await delivery.send(1, Screen(media=photo))
 
     sends = fake_bot.calls_to("send_photo")

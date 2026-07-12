@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable, Coroutine
 
 from telegram.error import TelegramError
 
@@ -20,7 +20,13 @@ from .args import ArgSpec, build_arg_specs, parse_args
 from .auth import Auth, has_guards
 from .callbacks import CallbackDataError
 from .exceptions import ConfigurationError
-from .injection import RESERVED_NAMES, Invocation, Providers, resolve_kwargs, unresolvable_params
+from .injection import (
+    RESERVED_NAMES,
+    Invocation,
+    Providers,
+    resolve_kwargs,
+    unresolvable_params,
+)
 from .logging import log_event
 from .middleware import Event, Middleware, compose
 from .ratelimit import RateLimiter, _Drop, throttle_spec
@@ -62,7 +68,9 @@ class Dispatch:
 
     # -- wiring -----------------------------------------------------------------
 
-    def invocation(self, handler_name: str, update: Any = None, context: Any = None) -> Invocation:
+    def invocation(
+        self, handler_name: str, update: Any = None, context: Any = None
+    ) -> Invocation:
         return Invocation(
             update=update,
             context=context,
@@ -99,7 +107,7 @@ class Dispatch:
 
     def ptb_callback(
         self, reg: Registration
-    ) -> Callable[[Any, Any], Awaitable[Any]]:
+    ) -> Callable[[Any, Any], Coroutine[Any, Any, Any]]:
         async def handle(update: Any, context: Any) -> Any:
             return await self.run(reg, update, context)
 

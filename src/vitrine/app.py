@@ -196,10 +196,8 @@ class Bot(Generic[P]):
         if not self.token:
             raise ConfigurationError("Bot needs a token to build the PTB application")
 
-        dispatch = self._make_dispatch()
         application = (
-            Application
-            .builder()
+            Application.builder()
             .token(self.token)
             .context_types(ContextTypes(context=self._context_type))
             .post_init(self._post_init)
@@ -254,6 +252,7 @@ class Bot(Generic[P]):
             dispatch.validate(reg)
             callback = dispatch.ptb_callback(reg)
             if reg.kind == "command":
+                assert reg.command is not None
                 handler: Any = CommandHandler(reg.command, callback)
             elif reg.kind == "callback":
                 assert reg.cb_model is not None
@@ -271,10 +270,12 @@ class Bot(Generic[P]):
             wired.append((conv.build(dispatch, middlewares), 0))
         for handler, group in self.router.walk_raw():
             wired.append((handler, group))
-        wired.append((
-            CallbackQueryHandler(_answer_noop, pattern=lambda d: d == NOOP),
-            0,
-        ))
+        wired.append(
+            (
+                CallbackQueryHandler(_answer_noop, pattern=lambda d: d == NOOP),
+                0,
+            )
+        )
 
         return wired
 

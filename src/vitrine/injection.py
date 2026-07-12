@@ -23,6 +23,7 @@ Everything is resolved at most once per invocation and cached.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Set
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -109,7 +110,10 @@ class Invocation:
 
 
 async def _call_factory(
-    factory: Callable[..., Any], inv: Invocation, providers: Providers, stack: tuple[str, ...]
+    factory: Callable[..., Any],
+    inv: Invocation,
+    providers: Providers,
+    stack: tuple[str, ...],
 ) -> Any:
     kwargs = await resolve_kwargs(factory, inv, providers, _stack=stack)
     if inspect.isasyncgenfunction(factory):
@@ -122,7 +126,9 @@ async def _call_factory(
             except StopAsyncIteration:
                 pass
             else:
-                raise InjectionError(f"provider {factory.__name__} yielded more than once")
+                raise InjectionError(
+                    f"provider {factory.__name__} yielded more than once"
+                )
 
         inv._cleanups.append(cleanup)
         return value
@@ -206,7 +212,7 @@ def unresolvable_params(
     fn: Callable[..., Any],
     providers: Providers,
     *,
-    extra_names: set[str] = frozenset(),  # type: ignore[assignment]
+    extra_names: Set[str] = frozenset(),
 ) -> list[str]:
     """Build-time check: which params of ``fn`` have no possible source?"""
     bad: list[str] = []

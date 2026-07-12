@@ -58,9 +58,13 @@ async def unban(user: User, user_service: UserService, tg_id: int):
     return Screen(text=Md().line("Unbanned ", code(tg_id), "."))
 
 
-@router.command("grant", description="Grant a role: /grant <tg_id> [role]", scope="admin")
+@router.command(
+    "grant", description="Grant a role: /grant <tg_id> [role]", scope="admin"
+)
 @admin_only
-async def grant(user: User, user_service: UserService, tg_id: int, role: str = "support"):
+async def grant(
+    user: User, user_service: UserService, tg_id: int, role: str = "support"
+):
     await user_service.grant(tg_id, role)
     audit("role.granted", actor=user.tg_id, target=tg_id, role=role)
 

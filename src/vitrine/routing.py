@@ -130,7 +130,11 @@ class Router:
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self.registrations.append(
                 Registration(
-                    kind="message", fn=fn, name=fn.__name__, filters=filters, group=group
+                    kind="message",
+                    fn=fn,
+                    name=fn.__name__,
+                    filters=filters,
+                    group=group,
                 )
             )
 

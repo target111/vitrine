@@ -26,14 +26,15 @@ from .callbacks import CallbackData
 from .screens import NOOP, Button
 
 T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
 
 
-class PageSource(Protocol[T]):
+class PageSource(Protocol[T_co]):
     """Anything paginatable: an in-memory list, a DB query, an API."""
 
     async def count(self) -> int: ...
 
-    async def fetch(self, offset: int, limit: int) -> Sequence[T]: ...
+    async def fetch(self, offset: int, limit: int) -> Sequence[T_co]: ...
 
 
 class ListSource(Generic[T]):

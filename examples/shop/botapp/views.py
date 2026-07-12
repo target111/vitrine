@@ -13,7 +13,11 @@ from domain.models import Order, OrderStatus, Product, User
 
 from .cbs import BuyCB, ConfirmCB, MenuCB, OrdersPageCB, ProductCB, UsersPageCB
 
-STATUS_ICONS = {OrderStatus.PENDING: "⏳", OrderStatus.PAID: "✅", OrderStatus.CANCELLED: "✖️"}
+STATUS_ICONS = {
+    OrderStatus.PENDING: "⏳",
+    OrderStatus.PAID: "✅",
+    OrderStatus.CANCELLED: "✖️",
+}
 
 
 def home(user: User) -> Screen:
@@ -103,7 +107,13 @@ def order_placed(order: Order, product: Product) -> Screen:
     return Screen(
         text=Md()
         .heading("⏳ Order placed")
-        .line(bold(product.title), " ×", code(order.qty), " for ", code(f"{order.total:.2f} cr"))
+        .line(
+            bold(product.title),
+            " ×",
+            code(order.qty),
+            " for ",
+            code(f"{order.total:.2f} cr"),
+        )
         .line(italic("You'll get a message when payment confirms.")),
         keyboard=[[Button("« Home", callback=MenuCB(section="home"))]],
     )
@@ -114,7 +124,14 @@ def order_confirmed(order: Order, product: Product) -> Screen:
     return Screen(
         text=Md()
         .heading("✅ Payment confirmed")
-        .line("Order ", code(f"#{order.id}"), " — ", bold(product.title), " ×", code(order.qty))
+        .line(
+            "Order ",
+            code(f"#{order.id}"),
+            " — ",
+            bold(product.title),
+            " ×",
+            code(order.qty),
+        )
         .line("Thanks for your purchase!"),
         keyboard=[[Button("📦 My orders", callback=OrdersPageCB())]],
     )
@@ -146,6 +163,8 @@ def users_page(page: Page[User]) -> Screen:
     doc = Md().heading("👥 Users")
     for user in page.items:
         flags = "".join(("👑" if user.is_admin else "", "🚫" if user.banned else ""))
-        doc.bullet(code(user.tg_id), f" {user.name} {flags}", f" — {user.balance:.2f} cr")
+        doc.bullet(
+            code(user.tg_id), f" {user.name} {flags}", f" — {user.balance:.2f} cr"
+        )
 
     return Screen(text=doc, keyboard=[nav_row(page, lambda n: UsersPageCB(page=n))])

@@ -70,7 +70,7 @@ async def test_full_run_transitions_and_finishes(fake_bot: FakeBot):
     result = await states["qty"](make_update(text="3"), context)
     assert result == ConversationHandler.END
 
-    (state, reason), = exits
+    ((state, reason),) = exits
     assert reason is ExitReason.FINISHED
     assert state.item == "widget" and state.qty == 3
     # each step's screen was delivered
@@ -118,7 +118,9 @@ async def test_timeout_runs_exit_hook_with_timeout(fake_bot: FakeBot):
     await timeout_cb(make_update(text="anything"), context)
 
     assert exits[0][1] is ExitReason.TIMEOUT
-    assert not [k for k in context.chat_data if context.chat_data.get(k)]  # state cleared
+    assert not [
+        k for k in context.chat_data if context.chat_data.get(k)
+    ]  # state cleared
 
 
 async def test_unknown_state_is_a_configuration_error(fake_bot: FakeBot):

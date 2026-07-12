@@ -90,7 +90,9 @@ class Button:
         callback_data: str | None = None
         if self.callback is not None:
             callback_data = (
-                self.callback.pack() if isinstance(self.callback, CallbackData) else self.callback
+                self.callback.pack()
+                if isinstance(self.callback, CallbackData)
+                else self.callback
             )
 
         return InlineKeyboardButton(
@@ -109,7 +111,8 @@ def build_markup(keyboard: KeyboardLike) -> InlineKeyboardMarkup | None:
         return keyboard
 
     rows = [
-        [btn.to_ptb() if isinstance(btn, Button) else btn for btn in row] for row in keyboard
+        [btn.to_ptb() if isinstance(btn, Button) else btn for btn in row]
+        for row in keyboard
     ]
     if not rows:
         return None
@@ -120,7 +123,9 @@ def build_markup(keyboard: KeyboardLike) -> InlineKeyboardMarkup | None:
 # --------------------------------------------------------------------------- media
 
 _EDITABLE_KINDS = frozenset({"photo", "video", "animation", "document", "audio"})
-_CAPTION_KINDS = frozenset({"photo", "video", "animation", "document", "audio", "voice"})
+_CAPTION_KINDS = frozenset(
+    {"photo", "video", "animation", "document", "audio", "voice"}
+)
 
 _SEND_METHODS = {
     "photo": ("send_photo", "photo"),
@@ -348,18 +353,24 @@ class Delivery:
         return await self.bot.send_message(
             chat_id=chat_id,
             reply_markup=screen.markup(),
-            link_preview_options=LinkPreviewOptions(is_disabled=not screen.link_preview),
+            link_preview_options=LinkPreviewOptions(
+                is_disabled=not screen.link_preview
+            ),
             **self._text_kwargs(screen),
             **{**screen.extra, **extra},
         )
 
-    async def _edit_text(self, message: Message, screen: Screen, **extra: Any) -> Message:
+    async def _edit_text(
+        self, message: Message, screen: Screen, **extra: Any
+    ) -> Message:
         try:
             result = await self.bot.edit_message_text(
                 chat_id=message.chat_id,
                 message_id=message.message_id,
                 reply_markup=screen.markup(),
-                link_preview_options=LinkPreviewOptions(is_disabled=not screen.link_preview),
+                link_preview_options=LinkPreviewOptions(
+                    is_disabled=not screen.link_preview
+                ),
                 **self._text_kwargs(screen),
                 **{**screen.extra, **extra},
             )
@@ -435,7 +446,9 @@ class Delivery:
         await self._remember(key, message, media.kind)
         return message
 
-    async def _edit_media(self, message: Message, screen: Screen, **extra: Any) -> Message:
+    async def _edit_media(
+        self, message: Message, screen: Screen, **extra: Any
+    ) -> Message:
         media = screen.media
         assert media is not None
         input_media_cls = _INPUT_MEDIA[media.kind]
@@ -445,7 +458,9 @@ class Delivery:
             result = await self.bot.edit_message_media(
                 chat_id=message.chat_id,
                 message_id=message.message_id,
-                media=input_media_cls(media=input_, caption=text, parse_mode=parse_mode),
+                media=input_media_cls(
+                    media=input_, caption=text, parse_mode=parse_mode
+                ),
                 reply_markup=screen.markup(),
                 **{**screen.extra, **extra},
             )
@@ -464,7 +479,9 @@ class Delivery:
                 try:
                     result = await attempt(self._fresh_bytes(media))
                 except BadRequest as exc2:
-                    logger.debug("edit_message_media retry failed (%s); replacing", exc2)
+                    logger.debug(
+                        "edit_message_media retry failed (%s); replacing", exc2
+                    )
                     return await self._replace(message, screen)
             else:
                 logger.debug("edit_message_media failed (%s); replacing message", exc)

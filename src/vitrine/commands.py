@@ -49,7 +49,9 @@ def help_screen(regs: Iterable[Registration], visible_scopes: set[str]) -> Scree
         if scope != "default":
             doc.blank().heading(scope.capitalize())
         for reg in by_scope[scope]:
-            doc.line(code(f"/{reg.command}"), " — ", reg.description or reg.command)
+            doc.line(
+                code(f"/{reg.command}"), " — ", reg.description or reg.command or ""
+            )
 
     return Screen(text=doc)
 
@@ -79,4 +81,6 @@ async def sync_command_menus(
                     _bot_commands(scoped), scope=BotCommandScopeChat(chat_id=chat_id)
                 )
             except Exception as exc:  # a bad chat id must not break startup
-                logger.warning("could not set %r commands for chat %s: %s", scope, chat_id, exc)
+                logger.warning(
+                    "could not set %r commands for chat %s: %s", scope, chat_id, exc
+                )

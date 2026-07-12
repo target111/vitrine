@@ -136,7 +136,13 @@ def main_menu(user: Profile) -> Screen:
     text = (
         Md()
         .heading("Demo Bot")
-        .line("Hello, ", bold(user.name), "! You have pressed ", code(user.clicks), " buttons.")
+        .line(
+            "Hello, ",
+            bold(user.name),
+            "! You have pressed ",
+            code(user.clicks),
+            " buttons.",
+        )
         .blank()
         .line(italic("Pick a section:"))
     )
@@ -144,7 +150,10 @@ def main_menu(user: Profile) -> Screen:
     return Screen(
         text=text,
         keyboard=[
-            [Button("🔮 Fortune", callback=FortuneCB()), Button("📜 List", callback=PageCB())],
+            [
+                Button("🔮 Fortune", callback=FortuneCB()),
+                Button("📜 List", callback=PageCB()),
+            ],
             [
                 Button(
                     "🔕 Unsubscribe" if user.id in SUBSCRIBERS else "🔔 Subscribe",
@@ -167,7 +176,7 @@ async def start(user: Profile):
 @bot.command("add", description="Add two numbers")
 async def add(a: float, b: float):
     """Typed args: /add 2 40 — arity/type errors produce automatic usage help."""
-    return Screen(text=Md().line(code(a), " + ", code(b), " = ", bold(a + b)))
+    return Screen(text=Md().line(code(a), " + ", code(b), " = ", bold(str(a + b))))
 
 
 @bot.command("echo", description="Echo text back, safely escaped")
@@ -197,7 +206,9 @@ async def ban(target_id: int, user: Profile):
 @requires("admin")
 async def promote(target_id: int, role: str = "moderator"):
     PROFILES.setdefault(target_id, Profile(id=target_id, name="?")).roles.add(role)
-    return Screen(text=Md().line("Gave ", code(target_id), " the ", bold(role), " role."))
+    return Screen(
+        text=Md().line("Gave ", code(target_id), " the ", bold(role), " role.")
+    )
 
 
 # --------------------------------------------------------------------- callbacks
@@ -211,7 +222,9 @@ async def about(update, context):
         .line("Built with ", link("vitrine", "https://example.invalid/vitrine"), ".")
         .line("Screens, typed callbacks, DI, workers — all in one file.")
     )
-    return Screen(text=text, keyboard=[[Button("« Back", callback=MenuCB(section="home"))]])
+    return Screen(
+        text=text, keyboard=[[Button("« Back", callback=MenuCB(section="home"))]]
+    )
 
 
 @bot.callback(MenuCB, when=lambda d: d.section == "home")
@@ -232,7 +245,9 @@ async def fortune(fortunes: list[str]):
 
 @bot.callback(PageCB)
 async def paged_list(data: PageCB):
-    page = await Paginator(ListSource([f"Item #{i}" for i in range(1, 48)]), 7).page(data.page)
+    page = await Paginator(ListSource([f"Item #{i}" for i in range(1, 48)]), 7).page(
+        data.page
+    )
     doc = Md().heading(f"Items — page {page.number}/{page.pages}")
     for item in page.items:
         doc.bullet(item)
@@ -279,7 +294,9 @@ async def feedback_topic(state: FeedbackState, update):
 async def feedback_body(state: FeedbackState, update, user: Profile):
     state.body = update.effective_message.text
     return END, Screen(
-        text=Md().line("Thanks, ", bold(user.name), "! Filed under ", code(state.topic), ".")
+        text=Md().line(
+            "Thanks, ", bold(user.name), "! Filed under ", code(state.topic), "."
+        )
     )
 
 

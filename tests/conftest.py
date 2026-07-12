@@ -39,10 +39,14 @@ def make_message(
     kwargs: dict[str, Any] = {}
     if photo:
         kwargs["photo"] = (
-            PhotoSize(file_id=f"fid-{next(_file_ids)}", file_unique_id="u", width=1, height=1),
+            PhotoSize(
+                file_id=f"fid-{next(_file_ids)}", file_unique_id="u", width=1, height=1
+            ),
         )
     if document:
-        kwargs["document"] = TgDocument(file_id=f"fid-{next(_file_ids)}", file_unique_id="u")
+        kwargs["document"] = TgDocument(
+            file_id=f"fid-{next(_file_ids)}", file_unique_id="u"
+        )
 
     return Message(
         message_id=next(_ids),
@@ -129,7 +133,10 @@ def make_update(
     text: str | None = None,
     query: FakeQuery | None = None,
     message: Any = None,
-) -> SimpleNamespace:
+) -> Any:
+    """Returns a duck-typed stand-in for ``telegram.Update``, not a real one:
+    handlers under test only touch a handful of attributes, and the dispatch
+    layer treats updates as ``Any`` throughout."""
     if message is None and text is not None:
         message = FakeMessage(text=text, chat_id=chat_id)
 
@@ -143,7 +150,9 @@ def make_update(
 
 
 def make_context(bot: FakeBot | None = None) -> SimpleNamespace:
-    return SimpleNamespace(bot=bot or FakeBot(), bot_data={}, chat_data={}, user_data={})
+    return SimpleNamespace(
+        bot=bot or FakeBot(), bot_data={}, chat_data={}, user_data={}
+    )
 
 
 @pytest.fixture
@@ -168,7 +177,11 @@ def make_dispatch(
     middlewares: list | None = None,
 ) -> Dispatch:
     dispatch = Dispatch(
-        providers or Providers(), ErrorRegistry(), RateLimiter(), auth, middlewares or []
+        providers or Providers(),
+        ErrorRegistry(),
+        RateLimiter(),
+        auth,
+        middlewares or [],
     )
     dispatch.delivery = Delivery(fake_bot, InMemoryFileIdCache())
 

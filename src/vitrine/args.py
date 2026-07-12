@@ -17,6 +17,7 @@ line, rendered as friendly UX by the error layer.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Set
 from dataclasses import dataclass
 from typing import Any, Callable, get_args, get_origin
 
@@ -58,7 +59,9 @@ def _convert(raw: str, annotation: Any, name: str) -> Any:
     except (ValueError, TypeError) as exc:
         labels = {int: "integer", float: "number"}
         kind = labels.get(annotation, getattr(annotation, "__name__", str(annotation)))
-        raise UsageError("", hint=f"{name} must be a valid {kind} (got {raw!r})") from exc
+        raise UsageError(
+            "", hint=f"{name} must be a valid {kind} (got {raw!r})"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,7 @@ class ArgSpec:
         return f"<{inner}>" if self.required else f"[{inner}]"
 
 
-def build_arg_specs(fn: Callable[..., Any], skip: set[str]) -> list[ArgSpec]:
+def build_arg_specs(fn: Callable[..., Any], skip: Set[str]) -> list[ArgSpec]:
     """Derive arg specs from ``fn``'s signature, ignoring injected names."""
     try:
         signature = inspect.signature(fn, eval_str=True)  # PEP 563 strings -> types
@@ -83,7 +86,10 @@ def build_arg_specs(fn: Callable[..., Any], skip: set[str]) -> list[ArgSpec]:
 
     specs: list[ArgSpec] = []
     for param in signature.parameters.values():
-        if param.name in skip or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+        if param.name in skip or param.kind in (
+            param.VAR_POSITIONAL,
+            param.VAR_KEYWORD,
+        ):
             continue
         greedy = param.annotation is Greedy
         required = param.default is param.empty

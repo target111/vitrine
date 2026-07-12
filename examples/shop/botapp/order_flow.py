@@ -16,7 +16,7 @@ from .cbs import BuyCB, ConfirmCB
 
 @dataclass
 class OrderDraft:
-    sku: str | None = None
+    sku: str = ""
     qty: int = 0
 
 

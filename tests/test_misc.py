@@ -27,7 +27,9 @@ def test_user_input_cannot_break_markup():
 
 
 def test_nesting_bold_link_and_lists():
-    doc = Md().bullet(bold(link("Order #7", "https://x.y/o?a=1&b=2")), " — ", italic("paid"))
+    doc = Md().bullet(
+        bold(link("Order #7", "https://x.y/o?a=1&b=2")), " — ", italic("paid")
+    )
     assert doc.render(2) == "• *[Order \\#7](https://x.y/o?a=1&b=2)* — _paid_"
 
 
@@ -46,7 +48,7 @@ def test_v1_fallback_drops_unsupported_styles():
 # ------------------------------------------------------------------- args
 
 
-def sample(update, amount: int, target: str = "self", note: Greedy = ""):
+def sample(update, amount: int, target: str = "self", note: Greedy = Greedy("")):
     pass
 
 
@@ -61,7 +63,11 @@ def test_specs_and_usage():
 
 def test_parse_required_optional_greedy():
     values = parse_args("pay", specs(), "5 alice for the pizza last night")
-    assert values == {"amount": 5, "target": "alice", "note": "for the pizza last night"}
+    assert values == {
+        "amount": 5,
+        "target": "alice",
+        "note": "for the pizza last night",
+    }
 
     values = parse_args("pay", specs(), "5")
     assert values == {"amount": 5, "target": "self", "note": ""}

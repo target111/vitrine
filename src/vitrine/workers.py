@@ -47,7 +47,9 @@ class WorkerSpec:
 
 
 class WorkerSupervisor:
-    def __init__(self, providers: Providers, make_invocation: Callable[[str], Invocation]) -> None:
+    def __init__(
+        self, providers: Providers, make_invocation: Callable[[str], Invocation]
+    ) -> None:
         self._providers = providers
         self._make_invocation = make_invocation
         self._specs: list[WorkerSpec] = []
@@ -58,11 +60,17 @@ class WorkerSupervisor:
 
     def start(self) -> None:
         for spec in self._specs:
-            task = asyncio.create_task(self._supervise(spec), name=f"vitrine-worker-{spec.name}")
+            task = asyncio.create_task(
+                self._supervise(spec), name=f"vitrine-worker-{spec.name}"
+            )
             self._tasks.append(task)
 
         if self._specs:
-            logger.info("started %d worker(s): %s", len(self._specs), ", ".join(s.name for s in self._specs))
+            logger.info(
+                "started %d worker(s): %s",
+                len(self._specs),
+                ", ".join(s.name for s in self._specs),
+            )
 
     async def stop(self) -> None:
         for task in self._tasks:
@@ -94,7 +102,12 @@ class WorkerSupervisor:
             except Exception:
                 failures += 1
                 delay = min(spec.backoff_max, spec.backoff_base * (2 ** (failures - 1)))
-                logger.exception("worker %s crashed (failure #%d); restarting in %.1fs", spec.name, failures, delay)
+                logger.exception(
+                    "worker %s crashed (failure #%d); restarting in %.1fs",
+                    spec.name,
+                    failures,
+                    delay,
+                )
                 await asyncio.sleep(delay)
                 continue
 
@@ -103,11 +116,21 @@ class WorkerSupervisor:
                 failures = 0
 
             if spec.every is not None:
-                log_event(logger, "worker.run", level=logging.DEBUG, worker=spec.name, ms=round(ran_for * 1000))
+                log_event(
+                    logger,
+                    "worker.run",
+                    level=logging.DEBUG,
+                    worker=spec.name,
+                    ms=round(ran_for * 1000),
+                )
                 await asyncio.sleep(spec.every)
             else:
                 # a long-running loop returned: treat like a soft failure and restart
                 failures += 1
                 delay = min(spec.backoff_max, spec.backoff_base * (2 ** (failures - 1)))
-                logger.warning("worker %s exited unexpectedly; restarting in %.1fs", spec.name, delay)
+                logger.warning(
+                    "worker %s exited unexpectedly; restarting in %.1fs",
+                    spec.name,
+                    delay,
+                )
                 await asyncio.sleep(delay)

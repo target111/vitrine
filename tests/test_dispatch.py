@@ -13,12 +13,14 @@ from conftest import FakeQuery, make_context, make_dispatch, make_message, make_
 async def test_command_args_parsed_and_injected(fake_bot):
     seen = {}
 
-    async def pay(update, amount: float, note: Greedy = "-"):
+    async def pay(update, amount: float, note: Greedy = Greedy("-")):
         seen.update(amount=amount, note=note)
 
     reg = Registration(kind="command", fn=pay, name="pay", command="pay")
     dispatch = make_dispatch(fake_bot)
-    await dispatch.run(reg, make_update(text="/pay 2.5 thanks for lunch"), make_context(fake_bot))
+    await dispatch.run(
+        reg, make_update(text="/pay 2.5 thanks for lunch"), make_context(fake_bot)
+    )
 
     assert seen == {"amount": 2.5, "note": "thanks for lunch"}
 
@@ -96,9 +98,13 @@ async def test_middleware_sees_handler_name_and_data(fake_bot):
     async def handler(data):
         pass
 
-    reg = Registration(kind="callback", fn=handler, name="menu", cb_model=MenuCB, middlewares=[mw])
+    reg = Registration(
+        kind="callback", fn=handler, name="menu", cb_model=MenuCB, middlewares=[mw]
+    )
     query = FakeQuery(data=MenuCB(section="s").pack())
-    await make_dispatch(fake_bot).run(reg, make_update(query=query), make_context(fake_bot))
+    await make_dispatch(fake_bot).run(
+        reg, make_update(query=query), make_context(fake_bot)
+    )
 
     assert seen == {"name": "menu", "data": MenuCB(section="s")}
 
@@ -138,7 +144,9 @@ async def test_user_facing_error_becomes_alert_on_callback(fake_bot):
 
     reg = Registration(kind="callback", fn=handler, name="wallet", cb_model=MenuCB)
     query = FakeQuery(data=MenuCB(section="wallet").pack())
-    await make_dispatch(fake_bot).run(reg, make_update(query=query), make_context(fake_bot))
+    await make_dispatch(fake_bot).run(
+        reg, make_update(query=query), make_context(fake_bot)
+    )
 
     assert ("Insufficient funds", True) in query.answers
 

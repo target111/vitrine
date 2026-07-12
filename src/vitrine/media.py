@@ -72,7 +72,9 @@ async def download(
         async with download(bot, message.document.file_id) as path:
             process(path)
     """
-    fd, name = tempfile.mkstemp(suffix=suffix, dir=str(directory) if directory else None)
+    fd, name = tempfile.mkstemp(
+        suffix=suffix, dir=str(directory) if directory else None
+    )
     os.close(fd)
     path = Path(name)
 

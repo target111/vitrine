@@ -8,7 +8,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
-    MessageHandler,
 )
 
 from vitrine import Auth, Bot, CallbackData, Conversation, Router
@@ -30,26 +29,21 @@ def test_wire_handlers_produces_ptb_handlers():
     sub = Router("admin")
 
     @bot.command("start", description="Start here")
-    async def start(update):
-        ...
+    async def start(update): ...
 
     @sub.command("ban", scope="admin", hidden=False)
-    async def ban(update, user_id: int):
-        ...
+    async def ban(update, user_id: int): ...
 
     @sub.callback(WireCB)
-    async def page(data):
-        ...
+    async def page(data): ...
 
     conv = Conversation("t_conv")
 
     @conv.entry(command="go")
-    async def go(update):
-        ...
+    async def go(update): ...
 
     @conv.state("step")
-    async def step(update):
-        ...
+    async def step(update): ...
 
     bot.include(sub)
     bot.conversation(conv)
@@ -68,8 +62,7 @@ def test_unresolvable_handler_param_fails_at_build_time():
     bot = make_bot()
 
     @bot.callback(WireCB)
-    async def broken(data, mystery_service):
-        ...
+    async def broken(data, mystery_service): ...
 
     with pytest.raises(ConfigurationError, match="mystery_service"):
         bot._wire_handlers()
@@ -119,16 +112,13 @@ async def test_help_screen_respects_scopes():
     bot = make_bot(auth=Auth(resolver, name="user", is_admin=lambda u: u.admin))
 
     @bot.command("start", description="Begin")
-    async def start(update):
-        ...
+    async def start(update): ...
 
     @bot.command("ban", description="Ban a user", scope="admin")
-    async def ban(update):
-        ...
+    async def ban(update): ...
 
     @bot.command("secret", hidden=True)
-    async def secret(update):
-        ...
+    async def secret(update): ...
 
     bot._wire_handlers()
     help_reg = next(r for r in bot._registrations if r.command == "help")

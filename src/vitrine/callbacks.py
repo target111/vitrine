@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import urllib.parse
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 from pydantic import BaseModel, ValidationError
 
@@ -122,7 +122,9 @@ class CallbackData(BaseModel):
 
     def _pack_positional(self) -> str:
         parts = [self.__prefix__]
-        parts += [_encode_value(getattr(self, name)) for name in type(self).model_fields]
+        parts += [
+            _encode_value(getattr(self, name)) for name in type(self).model_fields
+        ]
         return SEP.join(parts)
 
     def _pack_keyed(self) -> str:
@@ -141,7 +143,7 @@ class CallbackData(BaseModel):
     # -- decoding ---------------------------------------------------------------
 
     @classmethod
-    def unpack(cls, data: str) -> "CallbackData":
+    def unpack(cls, data: str) -> Self:
         """Decode and validate; raises :class:`CallbackDataError` on any problem.
 
         The wire format (positional vs keyed) is detected from the data, so
@@ -149,7 +151,9 @@ class CallbackData(BaseModel):
         """
         prefix, sep, rest = _split_prefix(data)
         if prefix != cls.__prefix__:
-            raise CallbackDataError(f"data {data!r} does not match prefix {cls.__prefix__!r}")
+            raise CallbackDataError(
+                f"data {data!r} does not match prefix {cls.__prefix__!r}"
+            )
 
         if sep == KEYED_SEP:
             values = cls._parse_keyed(data, rest)

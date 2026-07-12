@@ -20,7 +20,10 @@ class KeyValueFormatter(logging.Formatter):
     """``2026-07-11T12:00:00 INFO vitrine.update update.handled handler=start user=42 ms=13``"""
 
     def __init__(self) -> None:
-        super().__init__(fmt="%(asctime)s %(levelname)s %(name)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
+        super().__init__(
+            fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
 
     def format(self, record: logging.LogRecord) -> str:
         base = super().format(record)
@@ -50,7 +53,9 @@ def setup_logging(level: int | str = logging.INFO) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def log_event(logger: logging.Logger, event: str, /, level: int = logging.INFO, **fields: Any) -> None:
+def log_event(
+    logger: logging.Logger, event: str, /, level: int = logging.INFO, **fields: Any
+) -> None:
     """Emit one structured line: ``event key=value ...``."""
     logger.log(level, event, extra={FIELDS_KEY: fields})
 

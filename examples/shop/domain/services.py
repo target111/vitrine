@@ -10,7 +10,14 @@ import itertools
 import random
 from typing import Sequence
 
-from .models import InsufficientBalance, Order, OrderStatus, Product, UnknownProduct, User
+from .models import (
+    InsufficientBalance,
+    Order,
+    OrderStatus,
+    Product,
+    UnknownProduct,
+    User,
+)
 
 
 class UserService:
@@ -59,8 +66,18 @@ class CatalogService:
             for p in (
                 Product("vpn30", "VPN — 30 days", 4.99, "Fast, no logs, 12 regions."),
                 Product("vps1", "VPS — 1 vCPU", 6.00, "1 vCPU, 2 GB RAM, 20 GB NVMe."),
-                Product("proxy10", "Proxy pack ×10", 9.50, "Ten rotating residential proxies."),
-                Product("mail1", "Mailbox — 1 year", 12.00, "Private mailbox, custom domain."),
+                Product(
+                    "proxy10",
+                    "Proxy pack ×10",
+                    9.50,
+                    "Ten rotating residential proxies.",
+                ),
+                Product(
+                    "mail1",
+                    "Mailbox — 1 year",
+                    12.00,
+                    "Private mailbox, custom domain.",
+                ),
                 Product("cdn1", "CDN — 100 GB", 3.25, "Edge caching, instant purge."),
             )
         }
@@ -90,7 +107,12 @@ class OrderService:
 
         user.balance = round(user.balance - total, 2)
         order = Order(
-            id=next(self._ids), user_id=user.id, chat_id=chat_id, sku=sku, qty=qty, total=total
+            id=next(self._ids),
+            user_id=user.id,
+            chat_id=chat_id,
+            sku=sku,
+            qty=qty,
+            total=total,
         )
         self._orders[order.id] = order
 
