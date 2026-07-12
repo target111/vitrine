@@ -75,9 +75,13 @@ bot = Bot(token, auth=auth)
 @bot.command("refund", scope="admin")
 @requires("support")          # or @admin_only
 async def refund(user: User, order_id: int): ...
+
+@bot.command("profile")
+@requires_principal          # resolver returned None? -> "not registered" UX
+async def profile(user: User): ...
 ```
 
-Bans are enforced bot-wide. Guard failures turn into friendly error messages. Any handler asking for `user` gets the same instance -- no re-fetching during an update.
+Bans are enforced bot-wide. Guard failures turn into friendly error messages: a caller with no resolvable principal gets `NotRegisteredError` (point them at /start), one missing a role gets `NotAuthorizedError`. Any handler asking for `user` gets the same instance -- no re-fetching during an update.
 
 ### Screens & delivery (`vitrine.screens`)
 

@@ -49,6 +49,13 @@ class AuthError(UserFacingError):
     """Base class for identity/permission failures."""
 
 
+class NotRegisteredError(AuthError):
+    """No principal could be resolved for the caller."""
+
+    def __init__(self, message: str = "You are not registered yet.") -> None:
+        super().__init__(message, show_alert=True)
+
+
 class NotAuthorizedError(AuthError):
     """The resolved principal lacks a required role."""
 

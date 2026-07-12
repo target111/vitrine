@@ -18,7 +18,8 @@ framework owns *resolve once per update, cache, inject, guard*::
                                is_banned=lambda u: u.banned))
 
 Any handler that declares a ``user`` parameter receives the resolved principal;
-guards (:func:`requires`, :func:`admin_only`) read from the same object; bans
+guards (:func:`requires`, :func:`admin_only`, :func:`requires_principal`) read
+from the same object; bans
 are enforced bot-wide before any handler runs.
 """
 
@@ -27,13 +28,14 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, Generic, TypeVar
 
-from .exceptions import BannedError, NotAuthorizedError
+from .exceptions import BannedError, NotAuthorizedError, NotRegisteredError
 from .injection import Invocation, Providers, resolve_kwargs
 
 P = TypeVar("P")
 
 _ROLES_ATTR = "__vitrine_required_roles__"
 _ADMIN_ATTR = "__vitrine_admin_only__"
+_PRINCIPAL_ATTR = "__vitrine_requires_principal__"
 
 _CACHE_ATTR = "__vitrine_principal__"
 
@@ -101,6 +103,12 @@ class Auth(Generic[P]):
         if self.banned(principal):
             raise BannedError()
 
+        if principal is None:
+            if has_guards(fn):
+                raise NotRegisteredError()
+
+            return
+
         if getattr(fn, _ADMIN_ATTR, False) and not self.admin(principal):
             raise NotAuthorizedError(missing_roles=("admin",))
 
@@ -128,5 +136,15 @@ def admin_only(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
+def requires_principal(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Guard: a principal must resolve (the caller registered, e.g. via /start)."""
+    setattr(fn, _PRINCIPAL_ATTR, True)
+    return fn
+
+
 def has_guards(fn: Callable[..., Any]) -> bool:
-    return bool(getattr(fn, _ROLES_ATTR, ())) or bool(getattr(fn, _ADMIN_ATTR, False))
+    return (
+        bool(getattr(fn, _ROLES_ATTR, ()))
+        or bool(getattr(fn, _ADMIN_ATTR, False))
+        or bool(getattr(fn, _PRINCIPAL_ATTR, False))
+    )

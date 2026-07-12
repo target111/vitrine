@@ -3,9 +3,10 @@
 Run:  BOT_TOKEN=123:abc [ADMIN_ID=your_id] uv run python examples/small_bot.py
 
 Features on display: typed callbacks, Screens with edit/reply/media handling,
-markdown builder, DI providers, an in-memory principal with roles/bans, typed
-command args, pagination, a guided conversation, rate limiting, a background
-worker that proactively messages subscribers, error UX, and auto-/help.
+markdown builder, DI providers, an in-memory principal with roles/bans and an
+explicit /start registration gate, typed command args, pagination, a guided
+conversation, rate limiting, a background worker that proactively messages
+subscribers, error UX, and auto-/help.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from vitrine import (
     admin_only,
     nav_row,
     requires,
+    requires_principal,
     setup_logging,
     throttle,
 )
@@ -55,17 +57,14 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 
 async def resolve_profile(update) -> Profile | None:
+    """Lookup only — registration is explicit, in /start. Handlers that need a
+    profile are marked @requires_principal; unregistered callers get told to
+    /start instead of a crash or a misleading "not authorized"."""
     tg_user = getattr(update, "effective_user", None)
     if tg_user is None:
         return None
 
-    profile = PROFILES.get(tg_user.id)
-    if profile is None:
-        profile = PROFILES[tg_user.id] = Profile(id=tg_user.id, name=tg_user.first_name)
-        if tg_user.id == ADMIN_ID:
-            profile.roles.add("admin")
-
-    return profile
+    return PROFILES.get(tg_user.id)
 
 
 bot = Bot(
@@ -168,9 +167,30 @@ def main_menu(user: Profile) -> Screen:
 # --------------------------------------------------------------------- commands
 
 
-@bot.command("start", description="Open the main menu")
-async def start(user: Profile):
-    return main_menu(user)
+@bot.command("start", description="Register and open the main menu")
+async def start(update):
+    """The one unguarded entry point: registers the caller, then shows the menu."""
+    tg_user = update.effective_user
+    profile = PROFILES.get(tg_user.id)
+    if profile is None:
+        profile = PROFILES[tg_user.id] = Profile(id=tg_user.id, name=tg_user.first_name)
+        if tg_user.id == ADMIN_ID:
+            profile.roles.add("admin")
+
+    return main_menu(profile)
+
+
+@bot.command("me", description="Show your profile")
+@requires_principal  # unregistered callers get NotRegisteredError UX, not a crash
+async def me(user: Profile):
+    doc = (
+        Md()
+        .heading("Your profile")
+        .line("Name: ", bold(user.name))
+        .line("Roles: ", code(", ".join(sorted(user.roles)) or "none"))
+        .line("Buttons pressed: ", code(user.clicks))
+    )
+    return Screen(text=doc)
 
 
 @bot.command("add", description="Add two numbers")
@@ -224,6 +244,7 @@ async def about(update, context):
 
 
 @bot.callback(MenuCB, when=lambda d: d.section == "home")
+@requires_principal  # a stale keyboard can outlive the in-memory profile store
 async def back_home(user: Profile):
     return main_menu(user)
 
@@ -258,6 +279,7 @@ async def paged_list(data: PageCB):
 
 
 @bot.callback(SubCB)
+@requires_principal
 async def subscribe(data: SubCB, user: Profile):
     (SUBSCRIBERS.add if data.on else SUBSCRIBERS.discard)(user.id)
     return main_menu(user)
@@ -276,6 +298,7 @@ feedback = Conversation("feedback", FeedbackState, timeout=120)
 
 
 @feedback.entry(command="feedback")
+@requires_principal  # guards work on conversation entries too
 async def feedback_start(state: FeedbackState):
     return "topic", Screen(text="What is your feedback about? (or /cancel)")
 

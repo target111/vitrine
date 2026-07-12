@@ -5,8 +5,13 @@ from __future__ import annotations
 import pytest
 from conftest import make_context, make_dispatch, make_update
 
-from vitrine.auth import Auth, admin_only, requires
-from vitrine.exceptions import BannedError, InjectionError, NotAuthorizedError
+from vitrine.auth import Auth, admin_only, requires, requires_principal
+from vitrine.exceptions import (
+    BannedError,
+    InjectionError,
+    NotAuthorizedError,
+    NotRegisteredError,
+)
 from vitrine.injection import Depends, Invocation, Providers, resolve_kwargs
 from vitrine.routing import Registration
 
@@ -186,3 +191,64 @@ def test_guard_checks_directly():
         auth.check(admins, Principal(roles={"support"}))
     with pytest.raises(BannedError):
         auth.check(ok, Principal(roles={"support"}, banned=True))
+
+
+async def test_requires_principal_blocks_unregistered(fake_bot):
+    auth = make_auth(None, [])  # resolver finds nobody: caller never sent /start
+    ran = []
+
+    @requires_principal
+    async def handler(update):
+        ran.append(1)
+
+    reg = Registration(kind="message", fn=handler, name="h")
+    dispatch = make_dispatch(fake_bot, auth=auth)
+    update = make_update(text="x")
+    await dispatch.run(reg, update, make_context(fake_bot))
+
+    assert ran == []
+    assert update.effective_message.replies
+
+
+async def test_requires_principal_passes_registered(fake_bot):
+    auth = make_auth(Principal(), [])
+    ran = []
+
+    @requires_principal
+    async def handler(update):
+        ran.append(1)
+
+    reg = Registration(kind="message", fn=handler, name="h")
+    dispatch = make_dispatch(fake_bot, auth=auth)
+    await dispatch.run(reg, make_update(text="x"), make_context(fake_bot))
+
+    assert ran == [1]
+
+
+def test_requires_principal_check_directly():
+    auth = make_auth(None, [])
+
+    @requires_principal
+    async def handler(update):
+        pass
+
+    auth.check(handler, Principal())
+    with pytest.raises(NotRegisteredError):
+        auth.check(handler, None)
+
+
+def test_role_guards_report_unregistered_not_unauthorized():
+    auth = make_auth(None, [])
+
+    @requires("moderator")
+    async def moderate(update):
+        pass
+
+    @admin_only
+    async def administrate(update):
+        pass
+
+    with pytest.raises(NotRegisteredError):
+        auth.check(moderate, None)
+    with pytest.raises(NotRegisteredError):
+        auth.check(administrate, None)

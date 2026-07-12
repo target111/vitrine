@@ -9,7 +9,7 @@ reachable underneath.
 
 from .app import Bot, VitrineContext
 from .args import Greedy
-from .auth import Auth, admin_only, requires
+from .auth import Auth, admin_only, requires, requires_principal
 from .callbacks import CallbackData
 from .conversations import END, Conversation, ExitReason
 from .exceptions import (
@@ -20,6 +20,7 @@ from .exceptions import (
     FrameworkError,
     InjectionError,
     NotAuthorizedError,
+    NotRegisteredError,
     RateLimitedError,
     UsageError,
     UserFacingError,
@@ -74,6 +75,7 @@ __all__ = [
     "ListSource",
     "Media",
     "NotAuthorizedError",
+    "NotRegisteredError",
     "Page",
     "PageSource",
     "Paginator",
@@ -92,6 +94,7 @@ __all__ = [
     "log_event",
     "nav_row",
     "requires",
+    "requires_principal",
     "setup_logging",
     "throttle",
 ]
