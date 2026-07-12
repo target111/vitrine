@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vitrine import END, Conversation, ExitReason, Screen
-from vitrine.logging import audit
-
 from domain.models import User
 from domain.services import CatalogService, OrderService
+
+from vitrine import END, Conversation, ExitReason, Screen
+from vitrine.logging import audit
 
 from . import views
 from .cbs import BuyCB, ConfirmCB

@@ -52,7 +52,7 @@ MAX_LEN = 64  # Telegram's callback_data limit in bytes
 #: characters that would make a prefix ambiguous on the wire
 _FORBIDDEN_PREFIX_CHARS = SEP + KEYED_SEP + PAIR_SEP + KV_SEP
 
-_registry: dict[str, type["CallbackData"]] = {}
+_registry: dict[str, type[CallbackData]] = {}
 
 
 def _encode_value(value: Any) -> str:
@@ -122,9 +122,7 @@ class CallbackData(BaseModel):
 
     def _pack_positional(self) -> str:
         parts = [self.__prefix__]
-        parts += [
-            _encode_value(getattr(self, name)) for name in type(self).model_fields
-        ]
+        parts += [_encode_value(getattr(self, name)) for name in type(self).model_fields]
         return SEP.join(parts)
 
     def _pack_keyed(self) -> str:
@@ -151,9 +149,7 @@ class CallbackData(BaseModel):
         """
         prefix, sep, rest = _split_prefix(data)
         if prefix != cls.__prefix__:
-            raise CallbackDataError(
-                f"data {data!r} does not match prefix {cls.__prefix__!r}"
-            )
+            raise CallbackDataError(f"data {data!r} does not match prefix {cls.__prefix__!r}")
 
         if sep == KEYED_SEP:
             values = cls._parse_keyed(data, rest)

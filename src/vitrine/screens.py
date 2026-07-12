@@ -25,9 +25,10 @@ Robustness rules implemented here:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Sequence, Union
+from typing import TYPE_CHECKING, Any, Literal
 
 from telegram import (
     InlineKeyboardButton,
@@ -100,8 +101,8 @@ class Button:
         )
 
 
-Row = Sequence[Union[Button, InlineKeyboardButton]]
-KeyboardLike = Union[InlineKeyboardMarkup, Sequence[Row], None]
+Row = Sequence[Button | InlineKeyboardButton]
+KeyboardLike = InlineKeyboardMarkup | Sequence[Row] | None
 
 
 def build_markup(keyboard: KeyboardLike) -> InlineKeyboardMarkup | None:
@@ -111,8 +112,7 @@ def build_markup(keyboard: KeyboardLike) -> InlineKeyboardMarkup | None:
         return keyboard
 
     rows = [
-        [btn.to_ptb() if isinstance(btn, Button) else btn for btn in row]
-        for row in keyboard
+        [btn.to_ptb() if isinstance(btn, Button) else btn for btn in row] for row in keyboard
     ]
     if not rows:
         return None
@@ -123,9 +123,7 @@ def build_markup(keyboard: KeyboardLike) -> InlineKeyboardMarkup | None:
 # --------------------------------------------------------------------------- media
 
 _EDITABLE_KINDS = frozenset({"photo", "video", "animation", "document", "audio"})
-_CAPTION_KINDS = frozenset(
-    {"photo", "video", "animation", "document", "audio", "voice"}
-)
+_CAPTION_KINDS = frozenset({"photo", "video", "animation", "document", "audio", "voice"})
 
 _SEND_METHODS = {
     "photo": ("send_photo", "photo"),
@@ -266,7 +264,7 @@ class Screen:
         return build_markup(self.keyboard)
 
     async def render(
-        self, update: Update, context: "CallbackContext", *, fresh: bool = False
+        self, update: Update, context: CallbackContext, *, fresh: bool = False
     ) -> Message:
         """Ergonomic shortcut: deliver via the bot's Delivery service."""
         delivery = context.bot_data.get(DELIVERY_KEY) or Delivery(context.bot)
@@ -309,9 +307,7 @@ class Delivery:
 
         return await self._send_text(chat_id, screen, **extra)
 
-    async def render(
-        self, update: Update, screen: Screen, *, fresh: bool = False
-    ) -> Message:
+    async def render(self, update: Update, screen: Screen, *, fresh: bool = False) -> Message:
         """Edit in place when the update came from an inline button, else reply."""
         query = update.callback_query
         message = query.message if query is not None else None
@@ -353,24 +349,18 @@ class Delivery:
         return await self.bot.send_message(
             chat_id=chat_id,
             reply_markup=screen.markup(),
-            link_preview_options=LinkPreviewOptions(
-                is_disabled=not screen.link_preview
-            ),
+            link_preview_options=LinkPreviewOptions(is_disabled=not screen.link_preview),
             **self._text_kwargs(screen),
             **{**screen.extra, **extra},
         )
 
-    async def _edit_text(
-        self, message: Message, screen: Screen, **extra: Any
-    ) -> Message:
+    async def _edit_text(self, message: Message, screen: Screen, **extra: Any) -> Message:
         try:
             result = await self.bot.edit_message_text(
                 chat_id=message.chat_id,
                 message_id=message.message_id,
                 reply_markup=screen.markup(),
-                link_preview_options=LinkPreviewOptions(
-                    is_disabled=not screen.link_preview
-                ),
+                link_preview_options=LinkPreviewOptions(is_disabled=not screen.link_preview),
                 **self._text_kwargs(screen),
                 **{**screen.extra, **extra},
             )
@@ -446,9 +436,7 @@ class Delivery:
         await self._remember(key, message, media.kind)
         return message
 
-    async def _edit_media(
-        self, message: Message, screen: Screen, **extra: Any
-    ) -> Message:
+    async def _edit_media(self, message: Message, screen: Screen, **extra: Any) -> Message:
         media = screen.media
         assert media is not None
         input_media_cls = _INPUT_MEDIA[media.kind]
@@ -458,9 +446,7 @@ class Delivery:
             result = await self.bot.edit_message_media(
                 chat_id=message.chat_id,
                 message_id=message.message_id,
-                media=input_media_cls(
-                    media=input_, caption=text, parse_mode=parse_mode
-                ),
+                media=input_media_cls(media=input_, caption=text, parse_mode=parse_mode),
                 reply_markup=screen.markup(),
                 **{**screen.extra, **extra},
             )
@@ -479,9 +465,7 @@ class Delivery:
                 try:
                     result = await attempt(self._fresh_bytes(media))
                 except BadRequest as exc2:
-                    logger.debug(
-                        "edit_message_media retry failed (%s); replacing", exc2
-                    )
+                    logger.debug("edit_message_media retry failed (%s); replacing", exc2)
                     return await self._replace(message, screen)
             else:
                 logger.debug("edit_message_media failed (%s); replacing message", exc)

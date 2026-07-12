@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import pytest
+from conftest import make_context, make_dispatch, make_update
 
 from vitrine.auth import Auth, admin_only, requires
 from vitrine.exceptions import BannedError, InjectionError, NotAuthorizedError
 from vitrine.injection import Depends, Invocation, Providers, resolve_kwargs
 from vitrine.routing import Registration
-
-from conftest import make_context, make_dispatch, make_update
 
 
 async def test_reserved_names_and_providers():

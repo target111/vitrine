@@ -6,10 +6,10 @@ calling it and inspecting the returned Screen.
 
 from __future__ import annotations
 
+from domain.models import Order, OrderStatus, Product, User
+
 from vitrine import Button, Page, Screen, nav_row
 from vitrine.markdown import Md, bold, code, italic
-
-from domain.models import Order, OrderStatus, Product, User
 
 from .cbs import BuyCB, ConfirmCB, MenuCB, OrdersPageCB, ProductCB, UsersPageCB
 
@@ -163,8 +163,6 @@ def users_page(page: Page[User]) -> Screen:
     doc = Md().heading("👥 Users")
     for user in page.items:
         flags = "".join(("👑" if user.is_admin else "", "🚫" if user.banned else ""))
-        doc.bullet(
-            code(user.tg_id), f" {user.name} {flags}", f" — {user.balance:.2f} cr"
-        )
+        doc.bullet(code(user.tg_id), f" {user.name} {flags}", f" — {user.balance:.2f} cr")
 
     return Screen(text=doc, keyboard=[nav_row(page, lambda n: UsersPageCB(page=n))])

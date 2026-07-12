@@ -12,7 +12,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from telegram import Chat, Document as TgDocument, Message, PhotoSize, User
+from telegram import Chat, Message, PhotoSize, User
+from telegram import Document as TgDocument
 
 from vitrine.dispatch import Dispatch
 from vitrine.errors import ErrorRegistry
@@ -39,18 +40,14 @@ def make_message(
     kwargs: dict[str, Any] = {}
     if photo:
         kwargs["photo"] = (
-            PhotoSize(
-                file_id=f"fid-{next(_file_ids)}", file_unique_id="u", width=1, height=1
-            ),
+            PhotoSize(file_id=f"fid-{next(_file_ids)}", file_unique_id="u", width=1, height=1),
         )
     if document:
-        kwargs["document"] = TgDocument(
-            file_id=f"fid-{next(_file_ids)}", file_unique_id="u"
-        )
+        kwargs["document"] = TgDocument(file_id=f"fid-{next(_file_ids)}", file_unique_id="u")
 
     return Message(
         message_id=next(_ids),
-        date=datetime.datetime.now(datetime.timezone.utc),
+        date=datetime.datetime.now(datetime.UTC),
         chat=make_chat(chat_id),
         text=text,
         **kwargs,
@@ -150,9 +147,7 @@ def make_update(
 
 
 def make_context(bot: FakeBot | None = None) -> SimpleNamespace:
-    return SimpleNamespace(
-        bot=bot or FakeBot(), bot_data={}, chat_data={}, user_data={}
-    )
+    return SimpleNamespace(bot=bot or FakeBot(), bot_data={}, chat_data={}, user_data={})
 
 
 @pytest.fixture

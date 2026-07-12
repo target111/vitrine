@@ -17,9 +17,9 @@ line, rendered as friendly UX by the error layer.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Set
+from collections.abc import Callable, Set
 from dataclasses import dataclass
-from typing import Any, Callable, get_args, get_origin
+from typing import Any, get_args, get_origin
 
 from .exceptions import ConfigurationError, UsageError
 
@@ -59,9 +59,7 @@ def _convert(raw: str, annotation: Any, name: str) -> Any:
     except (ValueError, TypeError) as exc:
         labels = {int: "integer", float: "number"}
         kind = labels.get(annotation, getattr(annotation, "__name__", str(annotation)))
-        raise UsageError(
-            "", hint=f"{name} must be a valid {kind} (got {raw!r})"
-        ) from exc
+        raise UsageError("", hint=f"{name} must be a valid {kind} (got {raw!r})") from exc
 
 
 @dataclass(frozen=True)

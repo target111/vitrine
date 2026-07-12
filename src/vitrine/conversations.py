@@ -42,19 +42,22 @@ state object. Built on PTB's ``ConversationHandler``.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Awaitable, Callable, Coroutine
 from enum import Enum
-from typing import Any, Awaitable, Callable, Coroutine
+from typing import Any
 
 from telegram import Update
-from telegram.warnings import PTBUserWarning
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
     MessageHandler,
     TypeHandler,
+)
+from telegram.ext import (
     filters as ptb_filters,
 )
+from telegram.warnings import PTBUserWarning
 
 from .callbacks import CallbackData
 from .dispatch import Dispatch
@@ -124,9 +127,7 @@ class Conversation:
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """An entry point: a command, a typed callback button, or a message filter."""
         if command is None and callback is None and filters is None:
-            raise ConfigurationError(
-                "conversation entry needs a command, callback, or filters"
-            )
+            raise ConfigurationError("conversation entry needs a command, callback, or filters")
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self._steps.append(
@@ -172,9 +173,7 @@ class Conversation:
 
         return register
 
-    def on_exit(
-        self, fn: Callable[..., Awaitable[Any]]
-    ) -> Callable[..., Awaitable[Any]]:
+    def on_exit(self, fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
         """Cleanup hook: ``async def hook(state, reason, ...services)``."""
         self._exit_hook = fn
         return fn
@@ -206,9 +205,7 @@ class Conversation:
 
     # -- building -------------------------------------------------------------
 
-    def build(
-        self, dispatch: Dispatch, middlewares: list[Middleware]
-    ) -> ConversationHandler:
+    def build(self, dispatch: Dispatch, middlewares: list[Middleware]) -> ConversationHandler:
         state_names = {step.state for step in self._steps if step.state is not None}
 
         entry_points: list[Any] = []
@@ -294,9 +291,7 @@ class Conversation:
                 context,
                 result,
                 state_names,
-                end_reason=ExitReason.CANCELLED
-                if step.is_fallback
-                else ExitReason.FINISHED,
+                end_reason=ExitReason.CANCELLED if step.is_fallback else ExitReason.FINISHED,
                 force_end=step.is_fallback,
             )
 

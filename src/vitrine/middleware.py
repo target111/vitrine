@@ -18,8 +18,9 @@ that is how an i18n middleware hands a translator to every view.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 CallNext = Callable[["Event"], Awaitable[Any]]
 Middleware = Callable[["Event", CallNext], Awaitable[Any]]

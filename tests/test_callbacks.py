@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import pytest
+from conftest import FakeQuery, make_context, make_dispatch, make_update
 
 from vitrine.callbacks import CallbackData, decode
 from vitrine.dispatch import EXPIRED_BUTTON_TEXT
 from vitrine.exceptions import CallbackDataError
 from vitrine.routing import Registration
-
-from conftest import FakeQuery, make_context, make_dispatch, make_update
 
 
 class MenuCB(CallbackData, prefix="t_menu"):
@@ -161,9 +160,7 @@ def test_keyed_rejects_malformed_and_bad_types():
 
 def test_keyed_model_still_decodes_positional_data():
     """Flipping keyed=True must not strand buttons already in the wild."""
-    assert KeyedCB.unpack("t_keyed:shop:2:1") == KeyedCB(
-        section="shop", page=2, flag=True
-    )
+    assert KeyedCB.unpack("t_keyed:shop:2:1") == KeyedCB(section="shop", page=2, flag=True)
 
 
 def test_positional_model_decodes_keyed_data():

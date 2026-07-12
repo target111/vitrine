@@ -23,9 +23,9 @@ Everything is resolved at most once per invocation and cached.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Set
+from collections.abc import Callable, Set
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from .exceptions import InjectionError
 
@@ -87,7 +87,7 @@ class Invocation:
     error: Any = None  # set while dispatching error handlers
     extras: dict[str, Any] = field(default_factory=dict)
     principal_name: str | None = None
-    auth: "Auth | None" = None
+    auth: Auth | None = None
     _cache: dict[str, Any] = field(default_factory=dict)
     _cleanups: list[Callable[[], Any]] = field(default_factory=list)
 
@@ -126,9 +126,7 @@ async def _call_factory(
             except StopAsyncIteration:
                 pass
             else:
-                raise InjectionError(
-                    f"provider {factory.__name__} yielded more than once"
-                )
+                raise InjectionError(f"provider {factory.__name__} yielded more than once")
 
         inv._cleanups.append(cleanup)
         return value

@@ -5,14 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import pytest
+from conftest import FakeBot, make_context, make_dispatch, make_update
 from telegram.ext import ConversationHandler
 
 from vitrine.conversations import END, Conversation, ExitReason
 from vitrine.exceptions import ConfigurationError
 from vitrine.injection import Providers
 from vitrine.screens import Screen
-
-from conftest import FakeBot, make_context, make_dispatch, make_update
 
 
 @dataclass
@@ -118,9 +117,7 @@ async def test_timeout_runs_exit_hook_with_timeout(fake_bot: FakeBot):
     await timeout_cb(make_update(text="anything"), context)
 
     assert exits[0][1] is ExitReason.TIMEOUT
-    assert not [
-        k for k in context.chat_data if context.chat_data.get(k)
-    ]  # state cleared
+    assert not [k for k in context.chat_data if context.chat_data.get(k)]  # state cleared
 
 
 async def test_unknown_state_is_a_configuration_error(fake_bot: FakeBot):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import FakeQuery, make_context, make_update
 from telegram.ext import (
     ApplicationHandlerStop,
     CallbackQueryHandler,
@@ -12,8 +13,6 @@ from telegram.ext import (
 
 from vitrine import Auth, Bot, CallbackData, Conversation, Router
 from vitrine.exceptions import ConfigurationError
-
-from conftest import FakeQuery, make_context, make_update
 
 
 class WireCB(CallbackData, prefix="t_wire"):

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from vitrine import Auth
-
 from domain.models import User
 from domain.services import UserService
+
+from vitrine import Auth
 
 
 async def resolve_user(update, user_service: UserService) -> User | None:

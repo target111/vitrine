@@ -19,8 +19,9 @@ Sources fetch only the requested page, so DB-backed sources stay cheap::
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Generic, Protocol, Sequence, TypeVar
+from typing import Generic, Protocol, TypeVar
 
 from .callbacks import CallbackData
 from .screens import NOOP, Button

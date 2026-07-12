@@ -38,10 +38,10 @@ class Node:
     def render(self, version: int = 2) -> str:
         raise NotImplementedError
 
-    def __add__(self, other: Inline) -> "Seq":
+    def __add__(self, other: Inline) -> Seq:
         return Seq(self, other)
 
-    def __radd__(self, other: Inline) -> "Seq":
+    def __radd__(self, other: Inline) -> Seq:
         return Seq(other, self)
 
 
@@ -208,21 +208,21 @@ class Md(Node):
         if parts:
             self.line(*parts)
 
-    def line(self, *parts: Inline) -> "Md":
+    def line(self, *parts: Inline) -> Md:
         self._lines.append(Seq(*parts))
         return self
 
-    def blank(self) -> "Md":
+    def blank(self) -> Md:
         self._lines.append(Seq())
         return self
 
-    def heading(self, *parts: Inline) -> "Md":
+    def heading(self, *parts: Inline) -> Md:
         return self.line(bold(*parts))
 
-    def bullet(self, *parts: Inline) -> "Md":
+    def bullet(self, *parts: Inline) -> Md:
         return self.line(raw("• "), *parts)
 
-    def kv(self, key: Inline, value: Inline) -> "Md":
+    def kv(self, key: Inline, value: Inline) -> Md:
         return self.line(bold(key), raw(": "), value)
 
     def render(self, version: int = 2) -> str:

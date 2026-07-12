@@ -11,7 +11,6 @@ from vitrine.pagination import ListSource, Paginator, nav_row
 from vitrine.ratelimit import RateLimiter
 from vitrine.screens import NOOP
 
-
 # ------------------------------------------------------------------- markdown
 
 
@@ -27,9 +26,7 @@ def test_user_input_cannot_break_markup():
 
 
 def test_nesting_bold_link_and_lists():
-    doc = Md().bullet(
-        bold(link("Order #7", "https://x.y/o?a=1&b=2")), " — ", italic("paid")
-    )
+    doc = Md().bullet(bold(link("Order #7", "https://x.y/o?a=1&b=2")), " — ", italic("paid"))
     assert doc.render(2) == "• *[Order \\#7](https://x.y/o?a=1&b=2)* — _paid_"
 
 

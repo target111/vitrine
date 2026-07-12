@@ -22,6 +22,12 @@ dev = [
     "pytest-asyncio>=1.4.0",
 ]
 
+[tool.ruff]
+line-length = 96
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

@@ -12,9 +12,6 @@ from __future__ import annotations
 
 import os
 
-from vitrine import Bot, Button, Screen, setup_logging
-from vitrine.markdown import Md, code
-
 from botapp import admin, menus
 from botapp.cbs import MenuCB
 from botapp.identity import make_auth
@@ -22,6 +19,9 @@ from botapp.order_flow import order_flow
 from botapp.workers import reconcile_payments
 from domain.models import DomainError, InsufficientBalance
 from domain.services import CatalogService, OrderService, PaymentGateway, UserService
+
+from vitrine import Bot, Button, Screen, setup_logging
+from vitrine.markdown import Md, code
 
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 

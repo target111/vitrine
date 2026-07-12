@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from conftest import FakeQuery, make_context, make_dispatch, make_message, make_update
+
 from vitrine.args import Greedy
 from vitrine.exceptions import UserFacingError
 from vitrine.routing import Registration
 from vitrine.screens import Screen
-
-from conftest import FakeQuery, make_context, make_dispatch, make_message, make_update
 
 
 async def test_command_args_parsed_and_injected(fake_bot):
@@ -102,9 +102,7 @@ async def test_middleware_sees_handler_name_and_data(fake_bot):
         kind="callback", fn=handler, name="menu", cb_model=MenuCB, middlewares=[mw]
     )
     query = FakeQuery(data=MenuCB(section="s").pack())
-    await make_dispatch(fake_bot).run(
-        reg, make_update(query=query), make_context(fake_bot)
-    )
+    await make_dispatch(fake_bot).run(reg, make_update(query=query), make_context(fake_bot))
 
     assert seen == {"name": "menu", "data": MenuCB(section="s")}
 
@@ -144,9 +142,7 @@ async def test_user_facing_error_becomes_alert_on_callback(fake_bot):
 
     reg = Registration(kind="callback", fn=handler, name="wallet", cb_model=MenuCB)
     query = FakeQuery(data=MenuCB(section="wallet").pack())
-    await make_dispatch(fake_bot).run(
-        reg, make_update(query=query), make_context(fake_bot)
-    )
+    await make_dispatch(fake_bot).run(reg, make_update(query=query), make_context(fake_bot))
 
     assert ("Insufficient funds", True) in query.answers
 

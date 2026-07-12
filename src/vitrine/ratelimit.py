@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from .exceptions import RateLimitedError
 from .middleware import Event

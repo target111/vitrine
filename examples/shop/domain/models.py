@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
 @dataclass
@@ -31,7 +31,7 @@ class Product:
     blurb: str
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     PENDING = "pending"
     PAID = "paid"
     CANCELLED = "cancelled"

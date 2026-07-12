@@ -24,7 +24,8 @@ are enforced bot-wide before any handler runs.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Generic, Iterable, TypeVar
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any, Generic, TypeVar
 
 from .exceptions import BannedError, NotAuthorizedError
 from .injection import Invocation, Providers, resolve_kwargs

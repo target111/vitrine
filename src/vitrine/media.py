@@ -46,7 +46,7 @@ class InMemoryFileIdCache:
 
 
 def content_key(source: bytes | str | Path) -> str:
-    """Stable cache key for a media source: content hash for bytes/paths, the URL itself for URLs."""
+    """Stable cache key for a media source: content hash for bytes/paths, the URL itself for URLs."""  # noqa: E501
     if isinstance(source, bytes):
         return "sha256:" + hashlib.sha256(source).hexdigest()
 
@@ -72,9 +72,7 @@ async def download(
         async with download(bot, message.document.file_id) as path:
             process(path)
     """
-    fd, name = tempfile.mkstemp(
-        suffix=suffix, dir=str(directory) if directory else None
-    )
+    fd, name = tempfile.mkstemp(suffix=suffix, dir=str(directory) if directory else None)
     os.close(fd)
     path = Path(name)
 

@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, Awaitable, Callable, Generic, Sequence, TypeVar
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, Generic, TypeVar
 
 from telegram import Update
 from telegram.ext import (
@@ -33,9 +34,12 @@ from telegram.ext import (
     ExtBot,
     MessageHandler,
     TypeHandler,
+)
+from telegram.ext import (
     filters as ptb_filters,
 )
 
+from . import commands as command_discovery
 from .auth import Auth
 from .callbacks import CallbackDataError
 from .conversations import Conversation
@@ -49,7 +53,6 @@ from .ratelimit import RateLimiter
 from .routing import Registration, Router
 from .screens import DELIVERY_KEY, NOOP, Delivery
 from .workers import WorkerSpec, WorkerSupervisor
-from . import commands as command_discovery
 
 logger = logging.getLogger("vitrine.app")
 
@@ -127,7 +130,7 @@ class Bot(Generic[P]):
     # -- providers ---------------------------------------------------------------
 
     def provide(self, name: str | Callable[..., Any] | None = None) -> Any:
-        """Register a provider: ``@bot.provide("db")`` or ``@bot.provide`` (uses the fn name)."""
+        """Register a provider: ``@bot.provide("db")`` or ``@bot.provide`` (uses the fn name)."""  # noqa: E501
         if callable(name):
             self.providers.register(name.__name__, name)
             return name
@@ -144,15 +147,11 @@ class Bot(Generic[P]):
 
     # -- lifecycle ---------------------------------------------------------------
 
-    def on_startup(
-        self, fn: Callable[..., Awaitable[Any]]
-    ) -> Callable[..., Awaitable[Any]]:
+    def on_startup(self, fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
         self._startup_hooks.append(fn)
         return fn
 
-    def on_shutdown(
-        self, fn: Callable[..., Awaitable[Any]]
-    ) -> Callable[..., Awaitable[Any]]:
+    def on_shutdown(self, fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
         self._shutdown_hooks.append(fn)
         return fn
 
@@ -207,9 +206,7 @@ class Bot(Generic[P]):
         )
         self.application = application
         self._attach_delivery(
-            Delivery(
-                application.bot, self.file_ids, markdown_version=self.markdown_version
-            )
+            Delivery(application.bot, self.file_ids, markdown_version=self.markdown_version)
         )
         application.bot_data[DELIVERY_KEY] = self.delivery
 
@@ -241,9 +238,7 @@ class Bot(Generic[P]):
         self._registrations = list(self.router.walk())
 
         if self._help_command and not any(
-            reg.command == "help"
-            for reg in self._registrations
-            if reg.kind == "command"
+            reg.command == "help" for reg in self._registrations if reg.kind == "command"
         ):
             self._registrations.append(self._help_registration())
 
@@ -296,9 +291,9 @@ class Bot(Generic[P]):
 
     async def _visible_scopes(self, update: Any, context: Any) -> set[str]:
         scopes = {"default"}
-        all_scopes = {
-            reg.scope for reg in self._registrations if reg.kind == "command"
-        } | set(self._scope_chats)
+        all_scopes = {reg.scope for reg in self._registrations if reg.kind == "command"} | set(
+            self._scope_chats
+        )
 
         principal: P | None = None
         if self.auth is not None:
@@ -333,9 +328,7 @@ class Bot(Generic[P]):
             query = getattr(update, "callback_query", None)
             if query is not None:
                 try:
-                    await query.answer(
-                        "You are banned from using this bot.", show_alert=True
-                    )
+                    await query.answer("You are banned from using this bot.", show_alert=True)
                 except Exception:  # noqa: BLE001
                     pass
             raise ApplicationHandlerStop

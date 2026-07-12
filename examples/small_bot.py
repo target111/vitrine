@@ -16,12 +16,12 @@ import time
 from dataclasses import dataclass, field
 
 from vitrine import (
+    END,
     Auth,
     Bot,
     Button,
     CallbackData,
     Conversation,
-    END,
     ExitReason,
     Greedy,
     ListSource,
@@ -206,9 +206,7 @@ async def ban(target_id: int, user: Profile):
 @requires("admin")
 async def promote(target_id: int, role: str = "moderator"):
     PROFILES.setdefault(target_id, Profile(id=target_id, name="?")).roles.add(role)
-    return Screen(
-        text=Md().line("Gave ", code(target_id), " the ", bold(role), " role.")
-    )
+    return Screen(text=Md().line("Gave ", code(target_id), " the ", bold(role), " role."))
 
 
 # --------------------------------------------------------------------- callbacks
@@ -222,9 +220,7 @@ async def about(update, context):
         .line("Built with ", link("vitrine", "https://example.invalid/vitrine"), ".")
         .line("Screens, typed callbacks, DI, workers — all in one file.")
     )
-    return Screen(
-        text=text, keyboard=[[Button("« Back", callback=MenuCB(section="home"))]]
-    )
+    return Screen(text=text, keyboard=[[Button("« Back", callback=MenuCB(section="home"))]])
 
 
 @bot.callback(MenuCB, when=lambda d: d.section == "home")
@@ -245,9 +241,7 @@ async def fortune(fortunes: list[str]):
 
 @bot.callback(PageCB)
 async def paged_list(data: PageCB):
-    page = await Paginator(ListSource([f"Item #{i}" for i in range(1, 48)]), 7).page(
-        data.page
-    )
+    page = await Paginator(ListSource([f"Item #{i}" for i in range(1, 48)]), 7).page(data.page)
     doc = Md().heading(f"Items — page {page.number}/{page.pages}")
     for item in page.items:
         doc.bullet(item)
@@ -294,9 +288,7 @@ async def feedback_topic(state: FeedbackState, update):
 async def feedback_body(state: FeedbackState, update, user: Profile):
     state.body = update.effective_message.text
     return END, Screen(
-        text=Md().line(
-            "Thanks, ", bold(user.name), "! Filed under ", code(state.topic), "."
-        )
+        text=Md().line("Thanks, ", bold(user.name), "! Filed under ", code(state.topic), ".")
     )
 
 

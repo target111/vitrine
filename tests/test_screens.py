@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import pytest
+from conftest import FakeQuery, make_message, make_update
 from telegram.constants import KeyboardButtonStyle
 from telegram.error import BadRequest
 
 from vitrine.markdown import Md, bold
 from vitrine.screens import Button, Photo, Screen, media_kind
 
-from conftest import FakeQuery, make_message, make_update
-
 
 def test_screen_is_a_value_object_no_update_needed():
     screen = Screen(
         text=Md().heading("Hi there!").line("choose ", bold("wisely")),
-        keyboard=[
-            [Button("Go", callback="x"), Button("Docs", url="https://example.com")]
-        ],
+        keyboard=[[Button("Go", callback="x"), Button("Docs", url="https://example.com")]],
     )
     text, parse_mode = screen.content()
     assert parse_mode == "MarkdownV2"
@@ -122,9 +119,7 @@ async def test_failed_replacement_send_keeps_old_message(delivery, fake_bot):
     except BadRequest:
         pass
 
-    assert not fake_bot.calls_to(
-        "delete_message"
-    )  # never deleted without a replacement
+    assert not fake_bot.calls_to("delete_message")  # never deleted without a replacement
 
 
 async def test_media_to_media_edits_in_place(delivery, fake_bot):
@@ -148,9 +143,7 @@ async def test_file_id_cached_and_reused(delivery, fake_bot):
 async def test_rejected_file_id_triggers_one_reupload(delivery, fake_bot):
     photo = Photo(b"payload")
     await delivery.send(1, Screen(media=photo))  # populates the cache
-    fake_bot.fail_once(
-        "send_photo", BadRequest("Wrong file identifier/HTTP URL specified")
-    )
+    fake_bot.fail_once("send_photo", BadRequest("Wrong file identifier/HTTP URL specified"))
     await delivery.send(1, Screen(media=photo))
 
     sends = fake_bot.calls_to("send_photo")

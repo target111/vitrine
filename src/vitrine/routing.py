@@ -21,8 +21,9 @@ packages. Raw PTB handlers remain a first-class escape hatch via ``.raw()``.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any
 
 from .callbacks import CallbackData
 from .middleware import Middleware
@@ -54,8 +55,8 @@ class Router:
         self.name = name
         self.registrations: list[Registration] = []
         self.middlewares: list[Middleware] = []
-        self.children: list["Router"] = []
-        self.conversations: list["Conversation"] = []
+        self.children: list[Router] = []
+        self.conversations: list[Conversation] = []
         self.raw_handlers: list[tuple[Any, int]] = []
 
     # -- registration decorators ----------------------------------------------
@@ -147,11 +148,11 @@ class Router:
         self.middlewares.append(mw)
         return mw
 
-    def include(self, router: "Router") -> None:
+    def include(self, router: Router) -> None:
         """Mount a sub-router."""
         self.children.append(router)
 
-    def conversation(self, conversation: "Conversation") -> "Conversation":
+    def conversation(self, conversation: Conversation) -> Conversation:
         """Mount a guided conversation on this router."""
         self.conversations.append(conversation)
         return conversation
@@ -163,9 +164,7 @@ class Router:
 
     # -- traversal -------------------------------------------------------------
 
-    def walk(
-        self, outer_middlewares: list[Middleware] | None = None
-    ) -> Iterator[Registration]:
+    def walk(self, outer_middlewares: list[Middleware] | None = None) -> Iterator[Registration]:
         """Yield all registrations with accumulated middleware chains."""
         chain = [*(outer_middlewares or []), *self.middlewares]
         for reg in self.registrations:
@@ -176,7 +175,7 @@ class Router:
 
     def walk_conversations(
         self, outer_middlewares: list[Middleware] | None = None
-    ) -> Iterator[tuple["Conversation", list[Middleware]]]:
+    ) -> Iterator[tuple[Conversation, list[Middleware]]]:
         chain = [*(outer_middlewares or []), *self.middlewares]
         for conv in self.conversations:
             yield conv, chain

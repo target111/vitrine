@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from telegram.error import TelegramError
 
@@ -105,9 +106,7 @@ class Dispatch:
                 f"supply: not reserved, not a provider, not a command argument"
             )
 
-    def ptb_callback(
-        self, reg: Registration
-    ) -> Callable[[Any, Any], Coroutine[Any, Any, Any]]:
+    def ptb_callback(self, reg: Registration) -> Callable[[Any, Any], Coroutine[Any, Any, Any]]:
         async def handle(update: Any, context: Any) -> Any:
             return await self.run(reg, update, context)
 
@@ -159,9 +158,7 @@ class Dispatch:
                 specs = self.arg_specs(reg)
                 if specs:
                     assert reg.command is not None
-                    inv.extras.update(
-                        parse_args(reg.command, specs, command_arg_text(update))
-                    )
+                    inv.extras.update(parse_args(reg.command, specs, command_arg_text(update)))
 
             kwargs = await resolve_kwargs(reg.fn, inv, self.providers)
             result = reg.fn(**kwargs)

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from vitrine import Paginator, Router
-
 from domain.models import User
 from domain.services import CatalogService, OrderService
+
+from vitrine import Paginator, Router
 
 from . import views
 from .cbs import MenuCB, OrdersPageCB, ProductCB

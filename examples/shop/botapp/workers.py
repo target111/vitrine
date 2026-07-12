@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from domain.services import CatalogService, OrderService, PaymentGateway
+
 from vitrine import Delivery
 from vitrine.logging import audit
-
-from domain.services import CatalogService, OrderService, PaymentGateway
 
 from . import views
 
