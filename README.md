@@ -23,7 +23,17 @@ async def menu(data: MenuCB):          # decoded, validated payload injected
 bot.run()
 ```
 
-## Setup
+## Install
+
+Not on PyPI yet -- install straight from GitHub:
+
+```bash
+uv add git+https://github.com/target111/vitrine
+# or
+pip install git+https://github.com/target111/vitrine
+```
+
+## Local development
 
 ```bash
 uv sync                                   # install deps (PTB 22, pydantic 2)
