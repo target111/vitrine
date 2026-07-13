@@ -44,12 +44,11 @@ def test_screen_reply_markup_prefers_the_right_keyboard():
 
 
 def test_inline_and_reply_keyboard_on_one_screen_is_an_error():
-    screen = Screen(
-        keyboard=[[Button("Go", callback="x")]],
-        reply_keyboard=ReplyKeyboard([["A"]]),
-    )
     with pytest.raises(ValueError, match="not both"):
-        screen.reply_markup()
+        Screen(
+            keyboard=[[Button("Go", callback="x")]],
+            reply_keyboard=ReplyKeyboard([["A"]]),
+        )
 
 
 async def test_send_carries_the_reply_keyboard(delivery, fake_bot):

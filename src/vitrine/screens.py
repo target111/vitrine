@@ -156,6 +156,15 @@ class ReplyButton:
 ReplyRow = Sequence[ReplyButton | KeyboardButton | str]
 
 
+def _reply_button_to_ptb(btn: ReplyButton | KeyboardButton | str) -> KeyboardButton:
+    if isinstance(btn, ReplyButton):
+        return btn.to_ptb()
+    if isinstance(btn, str):
+        return KeyboardButton(btn)
+
+    return btn
+
+
 @dataclass(frozen=True)
 class ReplyKeyboard:
     """A reply keyboard shown under the input field, as a value object.
@@ -175,17 +184,7 @@ class ReplyKeyboard:
     selective: bool = False
 
     def to_ptb(self) -> ReplyKeyboardMarkup:
-        rows = [
-            [
-                btn.to_ptb()
-                if isinstance(btn, ReplyButton)
-                else KeyboardButton(btn)
-                if isinstance(btn, str)
-                else btn
-                for btn in row
-            ]
-            for row in self.rows
-        ]
+        rows = [[_reply_button_to_ptb(btn) for btn in row] for row in self.rows]
 
         return ReplyKeyboardMarkup(
             rows,
@@ -291,6 +290,7 @@ def media_kind(message: Message | None) -> str | None:
     for kind in _DETECT_ORDER:
         if getattr(message, kind, None):
             return kind
+
     return None
 
 
@@ -336,6 +336,12 @@ class Screen:
     link_preview: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.reply_keyboard is not None and build_markup(self.keyboard) is not None:
+            raise ValueError(
+                "a message carries an inline keyboard or a reply keyboard, not both"
+            )
+
     def content(self, markdown_version: int = 2) -> tuple[str | None, str | None]:
         """Resolve (text, parse_mode). Markdown nodes render with safe escaping."""
         if isinstance(self.text, Node):
@@ -351,13 +357,8 @@ class Screen:
         self,
     ) -> InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None:
         """The effective ``reply_markup`` for a send: inline or reply keyboard."""
-        inline = self.markup()
         if self.reply_keyboard is None:
-            return inline
-        if inline is not None:
-            raise ValueError(
-                "a message carries an inline keyboard or a reply keyboard, not both"
-            )
+            return self.markup()
         if isinstance(self.reply_keyboard, ReplyKeyboard):
             return self.reply_keyboard.to_ptb()
 
@@ -477,6 +478,7 @@ class Delivery:
                 return message
             logger.debug("edit_message_text failed (%s); replacing message", exc)
             return await self._replace(message, screen)
+
         return result if isinstance(result, Message) else message
 
     async def _media_input(self, media: Media) -> tuple[Any, str | None, bool]:
