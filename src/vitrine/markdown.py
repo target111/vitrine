@@ -140,6 +140,25 @@ class Pre(Node):
         return f"```{lang}\n{body}\n```"
 
 
+class Blockquote(Node):
+    """A block quotation, optionally expandable. Unsupported in Markdown (V1);
+    falls back to plain text."""
+
+    def __init__(self, text: str, expandable: bool = False) -> None:
+        self.text = text
+        self.expandable = expandable
+
+    def render(self, version: int = 2) -> str:
+        body = escape(self.text, version)
+        if version != 2:
+            return body
+
+        quoted = "\n".join(f">{line}" for line in body.split("\n"))
+        if self.expandable:
+            quoted = f"**{quoted}||"
+        return quoted
+
+
 class Link(Node):
     """An inline link; the label may be any fragment (e.g. bold text)."""
 
@@ -186,6 +205,10 @@ def code(value: object) -> Code:
 
 def pre(value: str, language: str | None = None) -> Pre:
     return Pre(value, language)
+
+
+def blockquote(value: str, expandable: bool = False) -> Blockquote:
+    return Blockquote(value, expandable)
 
 
 def link(label: Inline, url: str) -> Link:
