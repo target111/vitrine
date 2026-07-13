@@ -1,8 +1,10 @@
 [project]
-name = "vitrine"
+name = "vitrine-tg"
 version = "0.1.0"
 description = "A batteries-included framework on top of python-telegram-bot: typed callbacks, screens, DI, auth, conversations, and supervised workers."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "target111", email = "target111@protonmail.com" }
 ]
@@ -15,6 +17,9 @@ dependencies = [
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "vitrine"
 
 [dependency-groups]
 dev = [
