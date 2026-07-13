@@ -20,6 +20,9 @@ Robustness rules implemented here:
   ``file_id`` triggers exactly one re-upload and the cache is refreshed
 - Telegram's "message is not modified" is swallowed
 - ``fresh=True`` forces a brand-new message instead of an edit
+- reply keyboards (:class:`ReplyKeyboard`) only ride on sends — Telegram cannot
+  attach them via ``edit_*`` — so editing into a screen that carries one
+  becomes a replace (new message first, then delete)
 """
 
 from __future__ import annotations
@@ -38,8 +41,11 @@ from telegram import (
     InputMediaDocument,
     InputMediaPhoto,
     InputMediaVideo,
+    KeyboardButton,
     LinkPreviewOptions,
     Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import KeyboardButtonStyle
@@ -120,6 +126,81 @@ def build_markup(keyboard: KeyboardLike) -> InlineKeyboardMarkup | None:
         return None
 
     return InlineKeyboardMarkup(rows)
+
+
+# --------------------------------------------------------------------------- reply keyboard
+
+
+@dataclass(frozen=True)
+class ReplyButton:
+    """One reply-keyboard button. Pressing it sends its ``text`` as a message.
+
+    ``request_contact``/``request_location`` ask the client to share those
+    instead of sending text; handle the resulting updates with
+    ``@bot.message(filters.CONTACT)`` / ``filters.LOCATION`` — such presses
+    never reach a ``@bot.reply_button`` handler.
+    """
+
+    text: str
+    request_contact: bool = False
+    request_location: bool = False
+
+    def to_ptb(self) -> KeyboardButton:
+        return KeyboardButton(
+            self.text,
+            request_contact=self.request_contact,
+            request_location=self.request_location,
+        )
+
+
+ReplyRow = Sequence[ReplyButton | KeyboardButton | str]
+
+
+@dataclass(frozen=True)
+class ReplyKeyboard:
+    """A reply keyboard shown under the input field, as a value object.
+
+    Defaults are tuned for the launcher pattern: ``persistent=True`` keeps it
+    visible across messages, ``resize=True`` avoids the giant-button look. Set
+    it once (e.g. from ``/start``) via ``Screen(reply_keyboard=...)`` and wire
+    the presses with ``@bot.reply_button(label)``. Send
+    :data:`REMOVE_REPLY_KEYBOARD` to take it away again.
+    """
+
+    rows: Sequence[ReplyRow]
+    persistent: bool = True
+    resize: bool = True
+    one_time: bool = False
+    placeholder: str | None = None
+    selective: bool = False
+
+    def to_ptb(self) -> ReplyKeyboardMarkup:
+        rows = [
+            [
+                btn.to_ptb()
+                if isinstance(btn, ReplyButton)
+                else KeyboardButton(btn)
+                if isinstance(btn, str)
+                else btn
+                for btn in row
+            ]
+            for row in self.rows
+        ]
+
+        return ReplyKeyboardMarkup(
+            rows,
+            is_persistent=self.persistent,
+            resize_keyboard=self.resize,
+            one_time_keyboard=self.one_time,
+            input_field_placeholder=self.placeholder,
+            selective=self.selective,
+        )
+
+
+#: put on ``Screen.reply_keyboard`` to remove the user's current reply keyboard
+REMOVE_REPLY_KEYBOARD = ReplyKeyboardRemove()
+
+ReplyKeyboardLike = ReplyKeyboard | ReplyKeyboardMarkup | ReplyKeyboardRemove | None
 
 
 # --------------------------------------------------------------------------- media
@@ -250,6 +331,7 @@ class Screen:
     text: str | Node | None = None
     keyboard: KeyboardLike = None
     media: Media | None = None
+    reply_keyboard: ReplyKeyboardLike = None
     parse_mode: str | None = None
     link_preview: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
@@ -264,6 +346,22 @@ class Screen:
 
     def markup(self) -> InlineKeyboardMarkup | None:
         return build_markup(self.keyboard)
+
+    def reply_markup(
+        self,
+    ) -> InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | None:
+        """The effective ``reply_markup`` for a send: inline or reply keyboard."""
+        inline = self.markup()
+        if self.reply_keyboard is None:
+            return inline
+        if inline is not None:
+            raise ValueError(
+                "a message carries an inline keyboard or a reply keyboard, not both"
+            )
+        if isinstance(self.reply_keyboard, ReplyKeyboard):
+            return self.reply_keyboard.to_ptb()
+
+        return self.reply_keyboard
 
     async def render(
         self, update: Update, context: CallbackContext, *, fresh: bool = False
@@ -329,6 +427,10 @@ class Delivery:
 
         Replacement always sends the new message *before* deleting the old one.
         """
+        if screen.reply_keyboard is not None:
+            # Telegram can't attach reply keyboards via edit_*: replace instead.
+            return await self._replace(message, screen)
+
         old_kind = media_kind(message)
         new_kind = screen.media.kind if screen.media is not None else None
 
@@ -352,7 +454,7 @@ class Delivery:
     async def _send_text(self, chat_id: int, screen: Screen, **extra: Any) -> Message:
         return await self.bot.send_message(
             chat_id=chat_id,
-            reply_markup=screen.markup(),
+            reply_markup=screen.reply_markup(),
             link_preview_options=LinkPreviewOptions(is_disabled=not screen.link_preview),
             **self._text_kwargs(screen),
             **{**screen.extra, **extra},
@@ -416,7 +518,7 @@ class Delivery:
         method = getattr(self.bot, method_name)
         kwargs: dict[str, Any] = {
             "chat_id": chat_id,
-            "reply_markup": screen.markup(),
+            "reply_markup": screen.reply_markup(),
             **screen.extra,
             **extra,
         }

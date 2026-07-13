@@ -39,6 +39,7 @@ pip install git+https://github.com/target111/vitrine
 uv sync                                   # install deps (PTB 22, pydantic 2)
 uv run pytest                             # run tests
 BOT_TOKEN=... uv run python examples/small_bot.py
+BOT_TOKEN=... uv run python examples/launcher_bot.py
 BOT_TOKEN=... ADMIN_IDS=123 uv run python examples/shop/main.py
 ```
 
@@ -94,6 +95,22 @@ A `Screen` is a value object (text + keyboard + media + options) that doesn't ne
 
 Return a `Screen` from a handler and it renders automatically (edit for buttons, reply for commands). Or call `screen.render(update, context)` and `delivery.send(chat_id, screen)` manually.
 
+Screens can also carry a **persistent reply keyboard** — the launcher pattern:
+
+```python
+LAUNCHER = ReplyKeyboard([["🛍 Shop", "ℹ️ Help"]])          # persistent by default
+
+@bot.command("start")
+async def start():
+    return Screen(text="Welcome!", reply_keyboard=LAUNCHER)  # set once, sticks around
+
+@bot.reply_button("🛍 Shop")                                 # presses route like messages
+async def shop():
+    return shop_screen()                                     # jump here from anywhere
+```
+
+A message carries an inline *or* a reply keyboard, never both, and Telegram can't attach reply keyboards to edits — `Delivery` turns such edits into replaces automatically. `Screen(reply_keyboard=REMOVE_REPLY_KEYBOARD)` takes the keyboard away. See `examples/launcher_bot.py`.
+
 ### Lifecycle & workers (`vitrine.workers`)
 
 ```python
@@ -116,6 +133,7 @@ Workers get DI, start after init, and shut down gracefully. Crashes restart auto
 | Feature | Module | Details |
 |---|---|---|
 | Typed callbacks | `callbacks` | Pydantic models with a prefix. Stale/corrupt data returns "button expired" instead of crashing. Keyed encoding (`keyed=True`) uses query strings and tolerates schema changes; `unpack()` auto-detects either format so live buttons survive upgrades. |
+| Reply keyboards | `screens` | `ReplyKeyboard` value object (persistent + resized by default), `@bot.reply_button("label")` routes presses through the full pipeline, `REMOVE_REPLY_KEYBOARD` clears it. |
 | Markdown builder | `markdown` | Composable/nestable nodes, safe escaping for V1+V2, `raw()` escape hatch. |
 | Routers | `routing` | `@router.command/callback/message`, sub-routers, `router.raw()` for plain PTB handlers. |
 | Command args | `args` | Typed params from the signature; required/optional/`Greedy`; auto usage messages. |

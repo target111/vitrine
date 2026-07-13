@@ -113,6 +113,9 @@ class Bot(Generic[P]):
     def message(self, *args: Any, **kwargs: Any) -> Any:
         return self.router.message(*args, **kwargs)
 
+    def reply_button(self, *args: Any, **kwargs: Any) -> Any:
+        return self.router.reply_button(*args, **kwargs)
+
     def conversation(self, conversation: Conversation) -> Conversation:
         return self.router.conversation(conversation)
 

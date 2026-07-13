@@ -25,8 +25,11 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from telegram.ext import filters as ptb_filters
+
 from .callbacks import CallbackData
 from .middleware import Middleware
+from .screens import ReplyButton
 
 if TYPE_CHECKING:
     from .conversations import Conversation
@@ -142,6 +145,23 @@ class Router:
             return fn
 
         return register
+
+    def reply_button(
+        self, *buttons: ReplyButton | str, group: int = 0
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register a handler for presses of one or more reply-keyboard buttons.
+
+        A press arrives as a plain text message equal to the button label, so
+        this is sugar for a message handler with an exact-text filter. The full
+        pipeline applies (DI, guards, middleware), and a returned
+        :class:`~vitrine.screens.Screen` replies — a persistent keyboard set at
+        ``/start`` becomes a launcher that works from anywhere.
+        """
+        labels = [b.text if isinstance(b, ReplyButton) else b for b in buttons]
+        if not labels:
+            raise ValueError("reply_button needs at least one button or label")
+
+        return self.message(ptb_filters.Text(labels), group=group)
 
     def middleware(self, mw: Middleware) -> Middleware:
         """Attach middleware to every handler on this router and its children."""
