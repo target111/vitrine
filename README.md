@@ -156,4 +156,4 @@ Not a fork or parallel dispatcher. `bot.build()` returns the PTB `Application` f
 
 ## Testing
 
-Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 70 tests that exercise dispatch and conversations the same way you can.
+Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 95 tests that exercise dispatch and conversations the same way you can.
