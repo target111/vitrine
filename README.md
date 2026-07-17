@@ -1,5 +1,8 @@
 # vitrine
 
+[![CI](https://github.com/target111/vitrine/actions/workflows/ci.yml/badge.svg)](https://github.com/target111/vitrine/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/vitrine-tg)](https://pypi.org/project/vitrine-tg/)
+
 A framework for building Telegram bots with [python-telegram-bot](https://python-telegram-bot.org/) that doesn't get in your way.
 
 Handlers are just async functions. You get dependency injection, auth, robust message delivery, background workers, typed callbacks, rate limiting, and decent error handling -- the stuff every real bot needs. Everything from PTB stays accessible.
@@ -25,13 +28,13 @@ bot.run()
 
 ## Install
 
-Not on PyPI yet -- install straight from GitHub:
-
 ```bash
-uv add git+https://github.com/target111/vitrine
+uv add vitrine-tg
 # or
-pip install git+https://github.com/target111/vitrine
+pip install vitrine-tg
 ```
+
+The distribution is named `vitrine-tg`; the import name is `vitrine`.
 
 ## Local development
 
@@ -156,4 +159,4 @@ Not a fork or parallel dispatcher. `bot.build()` returns the PTB `Application` f
 
 ## Testing
 
-Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 95 tests that exercise dispatch and conversations the same way you can.
+Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 102 tests that exercise dispatch and conversations the same way you can.

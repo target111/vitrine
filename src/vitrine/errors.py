@@ -122,7 +122,7 @@ class ErrorRegistry:
             await _answer_or_reply(inv, error.message, show_alert=error.show_alert)
 
         @self.on(UsageError)
-        async def usage(error: UsageError, update: Any, context: Any) -> Screen | None:
+        async def usage(error: UsageError, update: Any, delivery: Any) -> Screen | None:
             message = getattr(update, "effective_message", None) if update else None
             if message is None:
                 return None
@@ -133,7 +133,9 @@ class ErrorRegistry:
             if error.usage:
                 doc.line("Usage: ", code(error.usage))
 
-            await message.reply_text(doc.render(2), parse_mode="MarkdownV2")
+            version = delivery.markdown_version if delivery is not None else 2
+            mode = "MarkdownV2" if version == 2 else "Markdown"
+            await message.reply_text(doc.render(version), parse_mode=mode)
             return None
 
         @self.on(TelegramError)

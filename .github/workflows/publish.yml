@@ -1,0 +1,25 @@
+# Publishes to PyPI via trusted publishing (OIDC) — no API token stored.
+# One-time setup on PyPI: project vitrine-tg -> Publishing -> add GitHub
+# publisher: owner target111, repo vitrine, workflow publish.yml,
+# environment pypi. Then create the "pypi" environment in the repo settings
+# and publish a GitHub release (tag v0.1.0) to trigger this.
+name: publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked
+      - run: uv run pytest -q
+      - run: uv build
+      - run: uv publish --trusted-publishing always

@@ -187,6 +187,14 @@ def test_prefix_cannot_contain_wire_characters():
                 pass
 
 
+def test_empty_string_field_rejected_at_pack_time():
+    """"" and omitted look identical on the wire; packing one must fail loudly."""
+    with pytest.raises(CallbackDataError, match="empty string"):
+        MenuCB(section="").pack()
+    with pytest.raises(CallbackDataError, match="empty string"):
+        KeyedCB(section="").pack()
+
+
 def test_keyed_inherited_from_abstract_base():
     class KeyedBase(CallbackData, keyed=True):
         pass

@@ -33,7 +33,7 @@ from .logging import log_event
 
 logger = logging.getLogger("vitrine.workers")
 
-#: a run longer than this is considered healthy and resets the backoff
+#: a long-running loop alive at least this long is healthy and resets the backoff
 _HEALTHY_RUNTIME = 30.0
 
 
@@ -113,10 +113,10 @@ class WorkerSupervisor:
                 continue
 
             ran_for = time.monotonic() - started
-            if ran_for >= _HEALTHY_RUNTIME:
-                failures = 0
 
             if spec.every is not None:
+                # a periodic run completed: that alone proves health
+                failures = 0
                 log_event(
                     logger,
                     "worker.run",
@@ -127,6 +127,8 @@ class WorkerSupervisor:
                 await asyncio.sleep(spec.every)
             else:
                 # a long-running loop returned: treat like a soft failure and restart
+                if ran_for >= _HEALTHY_RUNTIME:
+                    failures = 0
                 failures += 1
                 delay = min(spec.backoff_max, spec.backoff_base * (2 ** (failures - 1)))
                 logger.warning(

@@ -304,7 +304,10 @@ class Bot(Generic[P]):
         principal: P | None = None
         if self.auth is not None:
             inv = self._make_dispatch().invocation("help", update, context)
-            principal = await self.auth.resolve(inv, self.providers)
+            try:
+                principal = await self.auth.resolve(inv, self.providers)
+            finally:
+                await inv.aclose()
 
         for scope in all_scopes - {"default"}:
             if self._scope_member is not None:

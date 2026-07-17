@@ -120,16 +120,31 @@ class CallbackData(BaseModel):
 
         return packed
 
+    def _encode_field(self, name: str, value: Any) -> str:
+        # "" on the wire means omitted/None; an actual empty string would not
+        # survive the round trip and the button would decode as expired
+        encoded = _encode_value(value)
+        if not encoded and value is not None:
+            raise CallbackDataError(
+                f"{type(self).__name__}.{name} is an empty string, which is "
+                f"indistinguishable from an omitted value on the wire"
+            )
+
+        return encoded
+
     def _pack_positional(self) -> str:
         parts = [self.__prefix__]
-        parts += [_encode_value(getattr(self, name)) for name in type(self).model_fields]
+        parts += [
+            self._encode_field(name, getattr(self, name))
+            for name in type(self).model_fields
+        ]
         return SEP.join(parts)
 
     def _pack_keyed(self) -> str:
         # defaults are dropped (that's what keeps payloads stable); pydantic
         # already knows which fields still equal their default.
         pairs = [
-            f"{name}{KV_SEP}{_encode_value(value)}"
+            f"{name}{KV_SEP}{self._encode_field(name, value)}"
             for name, value in self.model_dump(exclude_defaults=True).items()
         ]
 

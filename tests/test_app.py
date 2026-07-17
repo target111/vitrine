@@ -130,3 +130,21 @@ async def test_help_screen_respects_scopes():
     user_screen = await help_reg.fn(make_update(user_id=2), make_context())
     text, _ = user_screen.content()
     assert "/ban" not in text.replace("\\", "")
+
+
+async def test_visible_scopes_closes_provider_cleanups():
+    """/help principal resolution must run generator-provider cleanups."""
+    closed = []
+
+    async def resolver(session):
+        return {"id": 1}
+
+    bot = make_bot(auth=Auth(resolver, name="user"))
+
+    @bot.provide("session")
+    async def session():
+        yield "sess"
+        closed.append(True)
+
+    await bot._visible_scopes(make_update(), make_context())
+    assert closed == [True]

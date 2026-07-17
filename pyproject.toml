@@ -9,10 +9,31 @@ authors = [
     { name = "target111", email = "target111@protonmail.com" }
 ]
 requires-python = ">=3.11"
+keywords = ["telegram", "bot", "framework", "python-telegram-bot", "asyncio"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2.13.4",
     "python-telegram-bot[job-queue]>=22.8",
 ]
+
+[project.urls]
+Homepage = "https://github.com/target111/vitrine"
+Repository = "https://github.com/target111/vitrine"
+Issues = "https://github.com/target111/vitrine/issues"
+Changelog = "https://github.com/target111/vitrine/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]

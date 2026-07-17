@@ -58,16 +58,28 @@ def throttle_spec(fn: Callable[..., Any]) -> ThrottleSpec | None:
     return getattr(fn, _SPEC_ATTR, None)
 
 
+#: sweep cadence: every N checks, drop keys whose window has fully expired
+_SWEEP_EVERY = 1024
+
+
 class RateLimiter:
     """Sliding-window counters, one deque of timestamps per key."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._hits: dict[str, deque[float]] = {}
         self._clock = clock
+        self._max_per = 0.0
+        self._checks = 0
 
     def check(self, key: str, limit: int, per: float) -> float:
         """Record a hit; returns 0.0 if allowed, else seconds until a slot frees."""
         now = self._clock()
+        self._max_per = max(self._max_per, per)
+        self._checks += 1
+        if self._checks >= _SWEEP_EVERY:
+            self._checks = 0
+            self._sweep(now)
+
         hits = self._hits.setdefault(key, deque())
         while hits and now - hits[0] >= per:
             hits.popleft()
@@ -77,6 +89,16 @@ class RateLimiter:
 
         hits.append(now)
         return 0.0
+
+    def _sweep(self, now: float) -> None:
+        """Idle keys never get another check; drop them once fully expired."""
+        stale = [
+            key
+            for key, hits in self._hits.items()
+            if not hits or now - hits[-1] >= self._max_per
+        ]
+        for key in stale:
+            del self._hits[key]
 
     async def enforce(self, spec: ThrottleSpec, event: Event) -> None:
         key = spec.key(event) if spec.key else self._default_key(event)

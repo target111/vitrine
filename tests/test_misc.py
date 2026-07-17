@@ -1,15 +1,18 @@
-"""Markdown builder, command args, pagination, rate limiter internals."""
+"""Markdown builder, command args, pagination, rate limiter internals, error UX."""
 
 from __future__ import annotations
 
 import pytest
+from conftest import FakeMessage, make_update
 
 from vitrine.args import ArgSpec, Greedy, build_arg_specs, parse_args, usage_string
+from vitrine.errors import ErrorRegistry
 from vitrine.exceptions import UsageError
+from vitrine.injection import Invocation, Providers
 from vitrine.markdown import Md, bold, code, escape, italic, link, raw
 from vitrine.pagination import ListSource, Paginator, nav_row
-from vitrine.ratelimit import RateLimiter
-from vitrine.screens import NOOP
+from vitrine.ratelimit import _SWEEP_EVERY, RateLimiter
+from vitrine.screens import NOOP, Delivery
 
 # ------------------------------------------------------------------- markdown
 
@@ -140,3 +143,34 @@ def test_sliding_window():
 
     now[0] = 10.1
     assert limiter.check("k", 2, per=10) == 0.0
+
+
+def test_idle_keys_are_swept():
+    now = [0.0]
+    limiter = RateLimiter(clock=lambda: now[0])
+    limiter.check("idle", 2, per=10)
+
+    now[0] = 100.0
+    for i in range(_SWEEP_EVERY):
+        limiter.check(f"k{i}", 2, per=10)
+
+    assert "idle" not in limiter._hits  # fully expired window: evicted
+    assert "k0" in limiter._hits  # live windows survive the sweep
+
+
+# ------------------------------------------------------------------- error UX
+
+
+async def test_usage_error_ux_respects_markdown_version(fake_bot):
+    message = FakeMessage()
+    inv = Invocation(
+        update=make_update(message=message),
+        delivery=Delivery(fake_bot, markdown_version=1),
+    )
+    await ErrorRegistry().dispatch(
+        UsageError("/pay <amount>", hint="missing amount"), inv, Providers()
+    )
+
+    text, kwargs = message.replies[0]
+    assert kwargs["parse_mode"] == "Markdown"
+    assert "missing amount" in text

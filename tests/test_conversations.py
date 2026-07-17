@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 from conftest import FakeBot, make_context, make_dispatch, make_update
@@ -91,6 +92,25 @@ async def test_state_object_created_fresh_per_run(fake_bot: FakeBot):
 
     key = [k for k in context.chat_data if k.startswith("__vitrine_conv:order")][0]
     assert context.chat_data[key].item == "second"
+
+
+def test_per_chat_false_state_follows_user_across_chats():
+    conv = Conversation("t_follow", OrderState, per_chat=False)
+    user_data: dict = {}
+    ctx_a = SimpleNamespace(chat_data={}, user_data=user_data)
+    ctx_b = SimpleNamespace(chat_data={}, user_data=user_data)
+
+    state = OrderState(item="widget")
+    conv._set_state(make_update(user_id=7, chat_id=1), ctx_a, state)
+    assert conv._get_state(make_update(user_id=7, chat_id=2), ctx_b) is state
+    assert not ctx_a.chat_data  # stored on the user, not the chat
+
+
+def test_per_chat_state_stays_on_the_chat():
+    conv = Conversation("t_stay", OrderState)  # per_chat=True is the default
+    ctx = SimpleNamespace(chat_data={}, user_data={})
+    conv._set_state(make_update(user_id=7, chat_id=1), ctx, OrderState())
+    assert ctx.chat_data and not ctx.user_data
 
 
 async def test_cancel_runs_exit_hook_with_cancelled(fake_bot: FakeBot):

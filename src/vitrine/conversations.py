@@ -183,13 +183,17 @@ class Conversation:
     # -- state storage -------------------------------------------------------------
 
     def _store(self, update: Any, context: Any) -> dict[str, Any]:
-        holder = getattr(context, "chat_data", None)
-        if holder is None:
-            holder = getattr(context, "user_data", None)
-        if holder is None:
-            raise ConfigurationError("context has neither chat_data nor user_data")
+        # mirror PTB's conversation key: per-chat state lives on the chat,
+        # otherwise it must follow the user across chats
+        preferred = (
+            ("chat_data", "user_data") if self.per_chat else ("user_data", "chat_data")
+        )
+        for attr in preferred:
+            holder = getattr(context, attr, None)
+            if holder is not None:
+                return holder
 
-        return holder
+        raise ConfigurationError("context has neither chat_data nor user_data")
 
     def _key(self, update: Any) -> str:
         user = getattr(update, "effective_user", None)
