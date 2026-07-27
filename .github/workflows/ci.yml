@@ -20,3 +20,19 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check src tests
       - run: uv run pytest -q
+
+  # The locked legs never see a python-telegram-bot release until someone bumps
+  # the lockfile. Conversation.end_run drives PTB internals that carry no
+  # version guarantee, so run the suite against the newest PTB to find out
+  # early. Advisory: a broken upstream release must not red-flag a PR.
+  ptb-latest:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - run: uv sync --upgrade-package python-telegram-bot
+      - run: uv run python -c "import telegram; print('PTB', telegram.__version__)"
+      - run: uv run pytest -q

@@ -122,7 +122,7 @@ class ErrorRegistry:
             await _answer_or_reply(inv, error.message, show_alert=error.show_alert)
 
         @self.on(UsageError)
-        async def usage(error: UsageError, update: Any, delivery: Any) -> Screen | None:
+        async def usage(error: UsageError, update: Any) -> Screen | None:
             message = getattr(update, "effective_message", None) if update else None
             if message is None:
                 return None
@@ -133,10 +133,13 @@ class ErrorRegistry:
             if error.usage:
                 doc.line("Usage: ", code(error.usage))
 
-            version = delivery.markdown_version if delivery is not None else 2
-            mode = "MarkdownV2" if version == 2 else "Markdown"
-            await message.reply_text(doc.render(version), parse_mode=mode)
-            return None
+            # Returned, not sent: the Screen goes out through Delivery like
+            # every other message the app produces. Argument parsing only runs
+            # for commands, so the usual usage error arrives on a message update
+            # and is sent to the chat. Raise UsageError by hand from a callback
+            # handler and Delivery edits that message instead, as it would for
+            # any Screen returned there.
+            return Screen(text=doc)
 
         @self.on(TelegramError)
         async def telegram_error(error: TelegramError, update: Any, context: Any) -> None:

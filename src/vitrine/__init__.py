@@ -11,7 +11,7 @@ from .app import Bot, VitrineContext
 from .args import Greedy
 from .auth import Auth, admin_only, requires, requires_principal
 from .callbacks import CallbackData
-from .conversations import END, Conversation, ExitReason
+from .conversations import ANY_STATE, END, Conversation, ExitReason
 from .exceptions import (
     AuthError,
     BannedError,
@@ -50,6 +50,7 @@ from .screens import (
 )
 
 __all__ = [
+    "ANY_STATE",
     "Animation",
     "Audio",
     "Auth",

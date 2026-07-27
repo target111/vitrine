@@ -21,6 +21,10 @@ class ConfirmCB(CallbackData, prefix="ok"):
     yes: bool
 
 
+class CancelCB(CallbackData, prefix="cancel"):
+    """The Cancel button: mounted on every state of the order flow."""
+
+
 class OrdersPageCB(CallbackData, prefix="opg"):
     page: int = 1
 

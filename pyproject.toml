@@ -1,6 +1,6 @@
 [project]
 name = "vitrine-tg"
-version = "0.1.0"
+version = "0.2.0"
 description = "A batteries-included framework on top of python-telegram-bot: typed callbacks, screens, DI, auth, conversations, and supervised workers."
 readme = "README.md"
 license = "MIT"

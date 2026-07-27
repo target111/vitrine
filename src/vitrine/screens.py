@@ -72,6 +72,14 @@ ButtonStyle = Literal["primary", "success", "danger"]
 _BUTTON_STYLES = frozenset({"primary", "success", "danger"})
 
 
+def _check_style(style: ButtonStyle | KeyboardButtonStyle | None) -> None:
+    """Reject a typo at construction, not on the send that fails in Telegram."""
+    if style is not None and str(style) not in _BUTTON_STYLES:
+        raise ValueError(
+            f"unknown button style {style!r}; expected one of {sorted(_BUTTON_STYLES)}"
+        )
+
+
 @dataclass(frozen=True)
 class Button:
     """One inline button. Exactly one of ``callback``/``url`` should be set.
@@ -88,11 +96,7 @@ class Button:
     style: ButtonStyle | KeyboardButtonStyle | None = None
 
     def __post_init__(self) -> None:
-        if self.style is not None and str(self.style) not in _BUTTON_STYLES:
-            raise ValueError(
-                f"unknown button style {self.style!r}; "
-                f"expected one of {sorted(_BUTTON_STYLES)}"
-            )
+        _check_style(self.style)
 
     def to_ptb(self) -> InlineKeyboardButton:
         callback_data: str | None = None
@@ -139,17 +143,25 @@ class ReplyButton:
     instead of sending text; handle the resulting updates with
     ``@bot.message(filters.CONTACT)`` / ``filters.LOCATION`` — such presses
     never reach a ``@bot.reply_button`` handler.
+
+    ``style`` colors the button on clients that support it, exactly as on
+    :class:`Button`; older clients ignore it.
     """
 
     text: str
     request_contact: bool = False
     request_location: bool = False
+    style: ButtonStyle | KeyboardButtonStyle | None = None
+
+    def __post_init__(self) -> None:
+        _check_style(self.style)
 
     def to_ptb(self) -> KeyboardButton:
         return KeyboardButton(
             self.text,
             request_contact=self.request_contact,
             request_location=self.request_location,
+            style=self.style,
         )
 
 

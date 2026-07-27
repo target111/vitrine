@@ -18,6 +18,7 @@ from vitrine import (
     Bot,
     Button,
     CallbackData,
+    ReplyButton,
     ReplyKeyboard,
     Screen,
     setup_logging,
@@ -28,8 +29,11 @@ bot = Bot(token=os.environ.get("BOT_TOKEN", ""))
 
 SHOP, PROFILE, HELP = "🛍 Shop", "👤 Profile", "ℹ️ Help"
 
+# A bare string is the plain button; ReplyButton adds options — here a style,
+# which colors it on clients that support styled buttons and is ignored on the
+# rest. Same three styles as an inline Button.
 LAUNCHER = ReplyKeyboard(
-    [[SHOP, PROFILE], [HELP]],
+    [[ReplyButton(SHOP, style="primary"), PROFILE], [HELP]],
     placeholder="Where to?",
 )
 

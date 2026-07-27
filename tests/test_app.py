@@ -11,7 +11,8 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from vitrine import Auth, Bot, CallbackData, Conversation, Router
+from vitrine import Auth, Bot, CallbackData, Conversation, ExitReason, Router
+from vitrine import commands as command_discovery
 from vitrine.exceptions import ConfigurationError
 
 
@@ -148,3 +149,111 @@ async def test_visible_scopes_closes_provider_cleanups():
 
     await bot._visible_scopes(make_update(), make_context())
     assert closed == [True]
+
+
+async def test_conversation_entry_commands_reach_help(fake_bot):
+    """A conversation's entry command is still a command: users must find it."""
+    bot = make_bot()
+    conv = Conversation("t_help_conv")
+
+    @conv.entry(command="order", description="Place an order")
+    async def order(update): ...
+
+    @conv.state("item")
+    async def item(update): ...
+
+    bot.conversation(conv)
+    wired = bot._wire_handlers()
+
+    # it is handled by the ConversationHandler, not by a second CommandHandler
+    assert [type(h) for h, _ in wired].count(CommandHandler) == 1  # only auto-/help
+
+    help_reg = next(r for r in bot._registrations if r.command == "help")
+    screen = await help_reg.fn(make_update(user_id=1), make_context())
+    text, _ = screen.content()
+    assert "/order" in text.replace("\\", "")
+    assert "Place an order" in text
+
+
+async def test_conversation_entry_commands_are_published_to_telegram(fake_bot):
+    bot = make_bot()
+    conv = Conversation("t_menu_conv")
+
+    @conv.entry(command="order", description="Place an order")
+    async def order(update): ...
+
+    @conv.state("item")
+    async def item(update): ...
+
+    bot.conversation(conv)
+    bot._wire_handlers()
+    await command_discovery.sync_command_menus(fake_bot, bot._registrations, {})
+
+    (published,) = fake_bot.calls_to("set_my_commands")[0]["args"]
+    assert [c.command for c in published] == ["help", "order"]
+
+
+async def test_a_hidden_conversation_entry_stays_out_of_help(fake_bot):
+    bot = make_bot()
+    conv = Conversation("t_hidden_conv")
+
+    @conv.entry(command="secret", hidden=True)
+    async def secret(update): ...
+
+    @conv.state("item")
+    async def item(update): ...
+
+    bot.conversation(conv)
+    bot._wire_handlers()
+
+    help_reg = next(r for r in bot._registrations if r.command == "help")
+    screen = await help_reg.fn(make_update(user_id=1), make_context())
+    text, _ = screen.content()
+    assert "secret" not in text
+
+
+async def test_exclusive_conversations_are_linked_across_routers(fake_bot):
+    """Peers are found bot-wide: a sub-router's flow still ends the other one."""
+    bot = make_bot()
+    exits = []
+
+    top = Conversation("t_top", exclusive=True)
+
+    @top.entry(command="top")
+    async def top_start(update):
+        return "item"
+
+    @top.state("item")
+    async def top_item(update): ...
+
+    @top.on_exit
+    async def top_exit(reason):
+        exits.append(reason)
+
+    sub_router = Router("sub")
+    nested = Conversation("t_nested", exclusive=True)
+
+    @nested.entry(command="nested")
+    async def nested_start(update):
+        return "item"
+
+    @nested.state("item")
+    async def nested_item(update): ...
+
+    bot.conversation(top)
+    sub_router.conversation(nested)
+    bot.include(sub_router)
+    bot._wire_handlers()
+
+    assert [peer.name for peer in top._peers] == ["t_nested"]
+
+    context = make_context(fake_bot)
+    update = make_update(text="/top")
+    await top._handler.entry_points[0].callback(update, context)
+    key = top._handler._get_key(update)
+    top._handler._conversations[key] = "item"  # what PTB records for a live run
+
+    await nested._handler.entry_points[0].callback(make_update(text="/nested"), context)
+
+    assert exits == [ExitReason.CANCELLED]
+    assert key not in top._handler._conversations

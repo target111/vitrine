@@ -136,12 +136,12 @@ Workers get DI, start after init, and shut down gracefully. Crashes restart auto
 | Feature | Module | Details |
 |---|---|---|
 | Typed callbacks | `callbacks` | Pydantic models with a prefix. Stale/corrupt data returns "button expired" instead of crashing. Keyed encoding (`keyed=True`) uses query strings and tolerates schema changes; `unpack()` auto-detects either format so live buttons survive upgrades. |
-| Reply keyboards | `screens` | `ReplyKeyboard` value object (persistent + resized by default), `@bot.reply_button("label")` routes presses through the full pipeline, `REMOVE_REPLY_KEYBOARD` clears it. |
+| Reply keyboards | `screens` | `ReplyKeyboard` value object (persistent + resized by default), `@bot.reply_button("label")` routes presses through the full pipeline, `ReplyButton(style=...)` takes the same styles as an inline `Button`, `REMOVE_REPLY_KEYBOARD` clears it. |
 | Markdown builder | `markdown` | Composable/nestable nodes, safe escaping for V1+V2, `raw()` escape hatch. |
 | Routers | `routing` | `@router.command/callback/message`, sub-routers, `router.raw()` for plain PTB handlers. |
 | Command args | `args` | Typed params from the signature; required/optional/`Greedy`; auto usage messages. |
 | Pagination | `pagination` | Implement `count()`/`fetch(offset, limit)`, use `Paginator` and `nav_row()` buttons. |
-| Conversations | `conversations` | Dataclass state per run, string transitions, timeout, `on_exit(reason)` hooks. Full DI/middleware/principal interop. |
+| Conversations | `conversations` | Dataclass state per run, string transitions, timeout, `on_exit(reason)` hooks. Entry commands land in `/help`; `ANY_STATE` mounts one step on every state; `command="skip"` is valid only inside its state; `exclusive=True` ends the caller's other runs. Full DI/middleware/principal interop. |
 | Files/media | `media` | `download()` with timeout and cleanup; content-hash `file_id` cache shared with Screen rendering. |
 | Rate limiting | `ratelimit` | `@throttle(3, per=60)`, custom keys and custom behavior on limits. |
 | Logging | `logging` | Key=value format, one line per update, `audit()` convention. |
@@ -153,10 +153,12 @@ Workers get DI, start after init, and shut down gracefully. Crashes restart auto
 
 `examples/shop/` is a full app: a storefront with a **domain layer that never touches the bot layer** (`domain/`), views as pure functions (`domain -> Screen`), services injected into handlers, a `User` principal for guards and menus, a purchase conversation, admin commands, and a reconciler worker that messages buyers. Only `main.py` knows all the layers.
 
+The order flow in `examples/shop/botapp/order_flow.py` shows the conversation features together: two entry points (a Buy button and a discoverable `/order` command), a `/skip` command scoped to one state, a single Cancel handler mounted on `ANY_STATE`, and `exclusive=True` so a new order abandons the caller's half-finished one.
+
 ## Escape hatches
 
 Not a fork or parallel dispatcher. `bot.build()` returns the PTB `Application` for webhooks. `router.raw(handler, group=...)` registers plain PTB handlers. `Screen.extra` passes kwargs to PTB's send methods. Everything from PTB stays accessible.
 
 ## Testing
 
-Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 102 tests that exercise dispatch and conversations the same way you can.
+Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 127 tests that exercise dispatch and conversations the same way you can.

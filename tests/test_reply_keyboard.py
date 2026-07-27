@@ -33,6 +33,19 @@ def test_reply_keyboard_builds_markup_from_strings_and_buttons():
     assert markup.input_field_placeholder == "Where to?"
 
 
+def test_a_reply_button_can_be_styled():
+    kb = ReplyKeyboard([[ReplyButton("💰 Top up", style="success"), "ℹ️ Help"]])
+    markup = kb.to_ptb()
+
+    assert markup.keyboard[0][0].style == "success"
+    assert markup.keyboard[0][1].style is None  # a plain label carries none
+
+
+def test_an_unknown_reply_button_style_is_rejected():
+    with pytest.raises(ValueError, match="unknown button style"):
+        ReplyButton("💰 Top up", style="chartreuse")
+
+
 def test_screen_reply_markup_prefers_the_right_keyboard():
     launcher = ReplyKeyboard([["A"]])
     assert isinstance(Screen(reply_keyboard=launcher).reply_markup(), ReplyKeyboardMarkup)

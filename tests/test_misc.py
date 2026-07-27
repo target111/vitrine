@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import deferred_annotations
 import pytest
 from conftest import FakeMessage, make_update
 
 from vitrine.args import ArgSpec, Greedy, build_arg_specs, parse_args, usage_string
 from vitrine.errors import ErrorRegistry
-from vitrine.exceptions import UsageError
+from vitrine.exceptions import ConfigurationError, UsageError
 from vitrine.injection import Invocation, Providers
 from vitrine.markdown import Md, bold, code, escape, italic, link, raw
 from vitrine.pagination import ListSource, Paginator, nav_row
@@ -83,6 +84,43 @@ def test_parse_failures():
     no_greedy = [ArgSpec("amount", int, True, False)]
     with pytest.raises(UsageError, match="too many"):
         parse_args("pay", no_greedy, "1 2")
+
+
+def test_args_survive_an_unresolvable_injected_annotation():
+    """Issue #1: `update: Update` under TYPE_CHECKING broke every other arg.
+
+    The signature cannot be evaluated as a whole, so the real types have to be
+    recovered per parameter -- and only for the ones that are arguments.
+    """
+    specs = build_arg_specs(deferred_annotations.note, skip={"update"})
+
+    assert [(s.name, s.annotation) for s in specs] == [
+        ("tag", str),
+        ("amount", int),
+        ("rest", Greedy),
+    ]
+
+
+def test_a_greedy_arg_stays_greedy_with_deferred_annotations():
+    """The string 'Greedy' matched nothing, so the trailing param silently
+    stopped consuming the rest of the line."""
+    specs = build_arg_specs(deferred_annotations.note, skip={"update"})
+
+    assert specs[-1].greedy
+    assert parse_args("note", specs, "x 5 and the rest") == {
+        "tag": "x",
+        "amount": 5,
+        "rest": "and the rest",
+    }
+
+
+def test_an_argument_type_must_be_importable_at_runtime():
+    """Converting calls the type, so a TYPE_CHECKING-only one cannot work --
+    say so at build time instead of rejecting every value the user sends."""
+    with pytest.raises(ConfigurationError, match="target"):
+        build_arg_specs(
+            deferred_annotations.unresolvable_argument, skip={"update"}
+        )
 
 
 def test_bool_conversion():
@@ -162,15 +200,14 @@ def test_idle_keys_are_swept():
 
 
 async def test_usage_error_ux_respects_markdown_version(fake_bot):
-    message = FakeMessage()
     inv = Invocation(
-        update=make_update(message=message),
+        update=make_update(message=FakeMessage()),
         delivery=Delivery(fake_bot, markdown_version=1),
     )
     await ErrorRegistry().dispatch(
         UsageError("/pay <amount>", hint="missing amount"), inv, Providers()
     )
 
-    text, kwargs = message.replies[0]
-    assert kwargs["parse_mode"] == "Markdown"
-    assert "missing amount" in text
+    sent = fake_bot.calls_to("send_message")[0]
+    assert sent["parse_mode"] == "Markdown"
+    assert "missing amount" in sent["text"]

@@ -11,7 +11,15 @@ from domain.models import Order, OrderStatus, Product, User
 from vitrine import Button, Page, Screen, nav_row
 from vitrine.markdown import Md, bold, code, italic
 
-from .cbs import BuyCB, ConfirmCB, MenuCB, OrdersPageCB, ProductCB, UsersPageCB
+from .cbs import (
+    BuyCB,
+    CancelCB,
+    ConfirmCB,
+    MenuCB,
+    OrdersPageCB,
+    ProductCB,
+    UsersPageCB,
+)
 
 STATUS_ICONS = {
     OrderStatus.PENDING: "⏳",
@@ -83,7 +91,10 @@ def ask_qty(product: Product) -> Screen:
     return Screen(
         text=Md()
         .line("How many ", bold(product.title), " would you like?")
-        .line(italic("Send a number, or /cancel."))
+        .line(italic("Send a number, /skip for one, or use the button.")),
+        # CancelCB is mounted on every state, so this row works unchanged
+        # wherever the flow shows it
+        keyboard=[[Button("✖️ Cancel", callback=CancelCB(), style="danger")]],
     )
 
 

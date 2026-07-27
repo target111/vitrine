@@ -243,15 +243,24 @@ class Bot(Generic[P]):
     def _wire_handlers(self) -> list[tuple[Any, int]]:
         """Turn all registrations into PTB handlers. Shared by build() and tests."""
         dispatch = self._make_dispatch()
-        self._registrations = list(self.router.walk())
+        handler_regs = list(self.router.walk())
+        conversations = [conv for conv, _ in self.router.walk_conversations()]
+        # A conversation's entry commands are handled by its own
+        # ConversationHandler, but they are still commands: they belong in
+        # /help and in the Telegram command menu like any other.
+        conv_regs = [reg for conv in conversations for reg in conv.command_registrations()]
 
         if self._help_command and not any(
-            reg.command == "help" for reg in self._registrations if reg.kind == "command"
+            reg.command == "help"
+            for reg in (*handler_regs, *conv_regs)
+            if reg.kind == "command"
         ):
-            self._registrations.append(self._help_registration())
+            handler_regs.append(self._help_registration())
+
+        self._registrations = [*handler_regs, *conv_regs]
 
         wired: list[tuple[Any, int]] = []
-        for reg in self._registrations:
+        for reg in handler_regs:
             dispatch.validate(reg)
             callback = dispatch.ptb_callback(reg)
             if reg.kind == "command":
@@ -271,6 +280,12 @@ class Bot(Generic[P]):
 
         for conv, middlewares in self.router.walk_conversations():
             wired.append((conv.build(dispatch, middlewares), 0))
+
+        # Peers are linked after every handler exists, since ending a run
+        # means reaching into the ConversationHandler that owns it.
+        exclusive = [conv for conv in conversations if conv.exclusive]
+        for conv in exclusive:
+            conv.link_peers(exclusive)
         for handler, group in self.router.walk_raw():
             wired.append((handler, group))
         wired.append((

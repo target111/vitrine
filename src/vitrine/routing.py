@@ -35,6 +35,17 @@ if TYPE_CHECKING:
     from .conversations import Conversation
 
 
+def first_doc_line(fn: Callable[..., Any]) -> str:
+    """A handler's summary line: the default command description.
+
+    The first non-blank line of the docstring, or ``""`` when there is nothing
+    to take -- including a docstring that is only whitespace.
+    """
+    lines = (fn.__doc__ or "").splitlines()
+
+    return next((line.strip() for line in lines if line.strip()), "")
+
+
 @dataclass
 class Registration:
     """One declaratively-registered handler and its metadata."""
@@ -76,9 +87,7 @@ class Router:
         """Register a ``/command`` handler; extra params become typed arguments."""
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
-            desc = description
-            if desc is None:
-                desc = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
+            desc = first_doc_line(fn) if description is None else description
 
             self.registrations.append(
                 Registration(

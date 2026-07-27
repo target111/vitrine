@@ -62,6 +62,24 @@ def _convert(raw: str, annotation: Any, name: str) -> Any:
         raise UsageError("", hint=f"{name} must be a valid {kind} (got {raw!r})") from exc
 
 
+def _resolve_annotation(fn: Callable[..., Any], param: inspect.Parameter) -> Any:
+    """Evaluate one PEP 563 annotation string against ``fn``'s own module."""
+    annotation = param.annotation
+    if not isinstance(annotation, str):
+        return annotation
+
+    try:
+        # globals only: builtins come along automatically, which is what the
+        # usual int/float/str/bool argument annotations need
+        return eval(annotation, getattr(fn, "__globals__", {}))
+    except Exception as exc:
+        raise ConfigurationError(
+            f"{fn.__name__}: cannot resolve the annotation {annotation!r} of command "
+            f"argument {param.name!r}. An argument is converted by calling its type, "
+            f"so it has to be importable at runtime -- not only under TYPE_CHECKING."
+        ) from exc
+
+
 @dataclass(frozen=True)
 class ArgSpec:
     name: str
@@ -77,10 +95,18 @@ class ArgSpec:
 
 def build_arg_specs(fn: Callable[..., Any], skip: Set[str]) -> list[ArgSpec]:
     """Derive arg specs from ``fn``'s signature, ignoring injected names."""
+    deferred = False
     try:
         signature = inspect.signature(fn, eval_str=True)  # PEP 563 strings -> types
     except NameError:
+        # A single unresolvable name -- classically `update: Update` imported
+        # only under TYPE_CHECKING -- used to leave *every* annotation in the
+        # signature a string, so `str` arrived as `'str'` and converting called
+        # it. Resolve the arguments one at a time below instead: the name that
+        # cannot be resolved is almost always on an injected parameter, and
+        # those are skipped before anything looks at their annotation.
         signature = inspect.signature(fn)
+        deferred = True
 
     specs: list[ArgSpec] = []
     for param in signature.parameters.values():
@@ -89,7 +115,8 @@ def build_arg_specs(fn: Callable[..., Any], skip: Set[str]) -> list[ArgSpec]:
             param.VAR_KEYWORD,
         ):
             continue
-        greedy = param.annotation is Greedy
+        annotation = _resolve_annotation(fn, param) if deferred else param.annotation
+        greedy = annotation is Greedy
         required = param.default is param.empty
         if specs and specs[-1].greedy:
             raise ConfigurationError(
@@ -98,7 +125,7 @@ def build_arg_specs(fn: Callable[..., Any], skip: Set[str]) -> list[ArgSpec]:
         specs.append(
             ArgSpec(
                 name=param.name,
-                annotation=param.annotation,
+                annotation=annotation,
                 required=required,
                 greedy=greedy,
                 default=None if required else param.default,

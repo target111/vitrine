@@ -34,7 +34,8 @@ async def test_usage_message_on_bad_args(fake_bot):
     update = make_update(text="/pay nope")
     await dispatch.run(reg, update, make_context(fake_bot))
 
-    reply, kwargs = update.effective_message.replies[0]
+    # the usage screen goes out through Delivery, like every other message
+    reply = fake_bot.calls_to("send_message")[0]["text"]
     assert "/pay" in reply and "amount" in reply
 
 
