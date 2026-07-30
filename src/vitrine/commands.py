@@ -48,6 +48,19 @@ def _command_regs(regs: Iterable[Registration]) -> list[Registration]:
     return result
 
 
+def unpublished_scopes(
+    regs: Iterable[Registration], scope_names: Iterable[str]
+) -> list[str]:
+    """Scopes commands claim that :func:`sync_command_menus` publishes to nobody.
+
+    Kept next to the publishing it predicts, and over the same
+    :func:`_command_regs` set, so the two cannot drift apart.
+    """
+    known = {"default", *scope_names}
+
+    return sorted({reg.scope for reg in _command_regs(regs) if reg.scope not in known})
+
+
 def help_screen(regs: Iterable[Registration], visible_scopes: set[str]) -> Screen:
     doc = Md().heading("Available commands")
     by_scope: dict[str, list[Registration]] = {}
@@ -124,9 +137,7 @@ def command_help_screen(reg: Registration, specs: Sequence[ArgSpec]) -> Screen:
     if specs:
         doc.blank().heading("Arguments")
         for spec in specs:
-            # named as the usage line names it, trailing dots and all
-            name = f"{spec.name}..." if spec.greedy else spec.name
-            doc.bullet(code(name), " — ", _argument_detail(spec))
+            doc.bullet(code(spec.label), " — ", _argument_detail(spec))
 
     requires = guard_summary(reg.fn)
     limit = throttle_spec(reg.fn)
@@ -174,14 +185,14 @@ async def sync_command_menus(
     await tg_bot.set_my_commands(_bot_commands(default), scope=BotCommandScopeDefault())
 
     known = set(published_chats)
-    scoped_chats: set[int] = set()
+    scoped_chats = {chat_id for ids in scope_chat_ids.values() for chat_id in ids}
     for scope, chat_ids in scope_chat_ids.items():
-        scoped = default + [reg for reg in commands if reg.scope == scope]
+        # one menu per scope, not per chat in it
+        menu = _bot_commands(default + [reg for reg in commands if reg.scope == scope])
         for chat_id in chat_ids:
-            scoped_chats.add(chat_id)
             try:
                 await tg_bot.set_my_commands(
-                    _bot_commands(scoped), scope=BotCommandScopeChat(chat_id=chat_id)
+                    menu, scope=BotCommandScopeChat(chat_id=chat_id)
                 )
             except Exception as exc:  # a bad chat id must not break startup
                 logger.warning(

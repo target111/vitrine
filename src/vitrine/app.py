@@ -47,12 +47,7 @@ from .injection import Providers
 from .media import FileIdCache, InMemoryFileIdCache
 from .middleware import Middleware
 from .ratelimit import RateLimiter
-from .routing import (
-    DEFAULT_MESSAGE_FILTERS,
-    Registration,
-    Router,
-    update_filters,
-)
+from .routing import Registration, Router, command_filters, message_filters
 from .screens import DELIVERY_KEY, NOOP, Delivery
 from .workers import WorkerSpec, WorkerSupervisor
 
@@ -91,8 +86,9 @@ class Bot(Generic[P]):
         #: earlier *run* -- typically every chat a scope has ever resolved to.
         #: A restart forgets what it published, so without this an admin
         #: demoted while the bot was down keeps their old menu; clearing a chat
-        #: that has no menu is a no-op, so a generous set is safe.
-        self._known_scope_chats = known_scope_chats
+        #: that has no menu is a no-op, so a generous set is safe. Read once,
+        #: by the first ``sync_commands()`` -- see ``_seeded_known_chats``.
+        self._known_scope_chats: ScopeChats = known_scope_chats or ()
         self._scope_member = scope_member
         self._context_type = context_type or VitrineContext
         #: fail the build, rather than log, when a handler's annotation and its
@@ -115,6 +111,7 @@ class Bot(Generic[P]):
         self._supervisor: WorkerSupervisor | None = None
         self._registrations: list[Registration] = []
         self._published_scope_chats: set[int] = set()
+        self._seeded_known_chats = False
 
     # -- registration (delegates to the root router) ---------------------------
 
@@ -286,20 +283,14 @@ class Bot(Generic[P]):
             if reg.kind == "command":
                 assert reg.command is not None
                 handler: Any = CommandHandler(
-                    reg.command, callback, filters=update_filters(None, edits=reg.edits)
+                    reg.command, callback, filters=command_filters(edits=reg.edits)
                 )
             elif reg.kind == "callback":
                 assert reg.cb_model is not None
                 handler = CallbackQueryHandler(callback, pattern=_callback_pattern(reg))
             else:
                 handler = MessageHandler(
-                    update_filters(
-                        reg.filters
-                        if reg.filters is not None
-                        else DEFAULT_MESSAGE_FILTERS,
-                        edits=reg.edits,
-                    ),
-                    callback,
+                    message_filters(reg.filters, edits=reg.edits), callback
                 )
             wired.append((handler, reg.group))
 
@@ -333,13 +324,8 @@ class Bot(Generic[P]):
         if not self._scope_chats:
             return
 
-        known = {"default", *self._scope_chats}
-        unknown = sorted(
-            {
-                reg.scope
-                for reg in self._registrations
-                if reg.kind == "command" and not reg.hidden and reg.scope not in known
-            }
+        unknown = command_discovery.unpublished_scopes(
+            self._registrations, self._scope_chats
         )
         if unknown:
             raise ConfigurationError(
@@ -469,11 +455,22 @@ class Bot(Generic[P]):
         changes -- an admin promoted, a chat banned -- and that caller's menu
         follows without a restart, including losing a menu they no longer
         qualify for.
+
+        Builds first for ``self._registrations``, not for the ``Application``:
+        the menus are published from the registrations, and only ``build()``
+        fills them in. On an already-running bot that call is a no-op.
         """
         application = self.build()
         known = set(self._published_scope_chats)
-        if self._known_scope_chats is not None:
+        if not self._seeded_known_chats:
+            # Only the first sync of a process has forgotten state to recover.
+            # After it, `_published_scope_chats` carries forward exactly what we
+            # wrote, and a chat cleared once must not be cleared again on every
+            # later call -- that is one API round-trip per historical chat, per
+            # call, plus a re-run of a `known_scope_chats` callable that is
+            # typically a database query.
             known |= set(await _resolve_chats(self._known_scope_chats))
+            self._seeded_known_chats = True
 
         self._published_scope_chats = await command_discovery.sync_command_menus(
             application.bot,

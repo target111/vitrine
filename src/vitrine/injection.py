@@ -237,9 +237,6 @@ def unresolvable_params(
 # test can settle it: everything else falls through unjudged, because a false
 # positive here would reject a working app.
 
-#: implicit conversions Python makes and annotations are expected to allow
-_NUMERIC_TOWER: dict[type, tuple[type, ...]] = {float: (int,), complex: (int, float)}
-
 
 def _nominal_class(annotation: Any) -> type | None:
     """``annotation`` as a class ``issubclass`` can judge, else ``None``.
@@ -250,8 +247,6 @@ def _nominal_class(annotation: Any) -> type | None:
     that fails ``issubclass`` does.
     """
     if annotation is inspect.Parameter.empty or annotation is Any:
-        return None
-    if isinstance(annotation, str):  # a PEP 563 string nothing could resolve
         return None
     if get_origin(annotation) is not None:
         return None
@@ -279,10 +274,9 @@ def _resolved_signature(fn: Callable[..., Any]) -> inspect.Signature | None:
 def _yielded_class(annotation: Any) -> type | None:
     """The ``X`` an ``AsyncIterator[X]``/``AsyncGenerator[X, ...]`` provider yields."""
     if get_origin(annotation) not in (AsyncIterator, AsyncGenerator):
-        return None
-    args = get_args(annotation)
+        return None  # including a bare AsyncIterator, whose origin is None
 
-    return _nominal_class(args[0]) if args else None
+    return _nominal_class(get_args(annotation)[0])
 
 
 def _factory_supplies(factory: Callable[..., Any]) -> type | None:
@@ -312,7 +306,7 @@ def type_mismatches(
     fn: Callable[..., Any],
     providers: Providers,
     *,
-    skip: Set[str] = frozenset(),
+    extra_names: Set[str] = frozenset(),
 ) -> list[tuple[str, type, type]]:
     """``(parameter, annotated, supplied)`` for each provably wrong annotation.
 
@@ -325,7 +319,9 @@ def type_mismatches(
 
     bad: list[tuple[str, type, type]] = []
     for param in signature.parameters.values():
-        if param.name in skip or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        if param.name in RESERVED_NAMES or param.name in extra_names:
             continue
 
         wanted = _nominal_class(param.annotation)
@@ -340,7 +336,9 @@ def type_mismatches(
             continue
 
         try:
-            if issubclass(supplied, wanted) or supplied in _NUMERIC_TOWER.get(wanted, ()):
+            # int under a float annotation is the one implicit conversion
+            # Python makes and an annotation is expected to allow
+            if issubclass(supplied, wanted) or (wanted is float and supplied is int):
                 continue
         except TypeError:  # an exotic metaclass; not ours to judge
             continue

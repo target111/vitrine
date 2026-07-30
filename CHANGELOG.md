@@ -4,7 +4,7 @@ Notable changes to vitrine. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-07-31
 
 ### Added
 
@@ -30,7 +30,9 @@ Notable changes to vitrine. The format follows
 - `Bot(known_scope_chats=...)` names the chats that may still carry a
   chat-scoped menu written by an earlier *run*, which a restart has otherwise
   forgotten. Clearing a chat that has no menu is a no-op, so a generous set --
-  every chat a scope has ever resolved to -- is safe.
+  every chat a scope has ever resolved to -- is safe. Read once per process, by
+  the first sync: only that one has anything to recover, and re-reading would
+  re-delete every historical chat's menu on every later `sync_commands()`.
 
 ### Changed
 
@@ -141,5 +143,6 @@ First release on PyPI as `vitrine-tg` (import name: `vitrine`).
   rate limiting, a composable Markdown builder, and structured logging.
 
 [#1]: https://github.com/target111/vitrine/issues/1
+[0.3.0]: https://github.com/target111/vitrine/releases/tag/v0.3.0
 [0.2.0]: https://github.com/target111/vitrine/releases/tag/v0.2.0
 [0.1.0]: https://github.com/target111/vitrine/releases/tag/v0.1.0

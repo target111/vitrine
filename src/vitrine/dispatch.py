@@ -110,9 +110,9 @@ class Dispatch:
                 f"supply: not reserved, not a provider, not a command argument"
             )
 
-        self._check_types(reg, skip=RESERVED_NAMES | extra)
+        self._check_types(reg, extra_names=extra)
 
-    def _check_types(self, reg: Registration, *, skip: Set[str]) -> None:
+    def _check_types(self, reg: Registration, *, extra_names: Set[str]) -> None:
         """Report annotations the provider demonstrably cannot satisfy.
 
         A warning by default: injection is by name, and a hand-written stand-in
@@ -120,7 +120,9 @@ class Dispatch:
         test suite does it. ``Bot(strict_types=True)`` promotes it to a build
         failure for apps that would rather have the guarantee.
         """
-        for name, wanted, supplied in type_mismatches(reg.fn, self.providers, skip=skip):
+        for name, wanted, supplied in type_mismatches(
+            reg.fn, self.providers, extra_names=extra_names
+        ):
             message = (
                 f"handler {reg.name!r} annotates {name!r} as {wanted.__name__}, but "
                 f"its provider supplies {supplied.__name__}"

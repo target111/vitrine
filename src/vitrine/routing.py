@@ -62,24 +62,25 @@ def validate_command_name(command: str, owner: str) -> str:
     return command
 
 
-def update_filters(filters: Any, *, edits: bool) -> Any:
-    """Narrow ``filters`` to fresh messages unless the handler wants edits.
+#: Telegram delivers an edit as a new update carrying the whole message, and
+#: PTB's defaults match those too: editing an old ``/help`` into ``/whatever``
+#: runs ``/whatever``, and editing any old text message re-feeds it to message
+#: handlers -- including whichever conversation state is live *now*, several
+#: steps past the one that first read it. Handlers are narrowed to this unless
+#: they ask for edits with ``edits=True``.
+FRESH_MESSAGES = ptb_filters.UpdateType.MESSAGE
 
-    Telegram delivers an edit as a new update carrying the whole message, and
-    PTB's defaults match those too: editing an old ``/help`` into ``/whatever``
-    runs ``/whatever``, and editing any old text message re-feeds it to message
-    handlers -- including whichever conversation state is live *now*, several
-    steps past the one that first read it. Handlers see only fresh messages
-    unless they ask with ``edits=True``.
 
-    ``None`` means "whatever PTB's handler class defaults to".
-    """
-    if edits:
-        return filters
-    if filters is None:
-        return ptb_filters.UpdateType.MESSAGE
+def command_filters(*, edits: bool) -> Any:
+    """Filters for a ``CommandHandler``; ``None`` leaves PTB's own default."""
+    return None if edits else FRESH_MESSAGES
 
-    return filters & ptb_filters.UpdateType.MESSAGE
+
+def message_filters(filters: Any, *, edits: bool) -> Any:
+    """Filters for a ``MessageHandler``; ``None`` means the text default."""
+    base = DEFAULT_MESSAGE_FILTERS if filters is None else filters
+
+    return base if edits else base & FRESH_MESSAGES
 
 
 def _doc_parts(fn: Callable[..., Any]) -> tuple[str, str]:
@@ -160,7 +161,7 @@ class Router:
         """Register a ``/command`` handler; extra params become typed arguments.
 
         ``edits=True`` also fires the handler when a user edits an older
-        message into this command -- off by default, see :func:`update_filters`.
+        message into this command -- off by default, see :data:`FRESH_MESSAGES`.
         """
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -221,7 +222,7 @@ class Router:
         """Register a message handler with PTB filters (defaults to text messages).
 
         ``edits=True`` also fires the handler for edits of older messages --
-        off by default, see :func:`update_filters`.
+        off by default, see :data:`FRESH_MESSAGES`.
         """
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:

@@ -282,7 +282,7 @@ def test_a_provided_value_that_contradicts_the_annotation_is_reported():
 
     async def handler(update, orders: Orders): ...
 
-    assert type_mismatches(handler, providers, skip={"update"}) == [
+    assert type_mismatches(handler, providers) == [
         ("orders", Orders, str)
     ]
 
@@ -300,7 +300,7 @@ def test_a_factory_is_judged_by_what_it_says_it_returns():
 
     async def handler(update, orders: Orders, session: Orders): ...
 
-    assert type_mismatches(handler, providers, skip={"update"}) == [
+    assert type_mismatches(handler, providers) == [
         ("orders", Orders, str),
         ("session", Orders, str),  # the yielded type, not the generator
     ]
@@ -311,7 +311,7 @@ def test_an_explicit_depends_is_judged_the_same_way():
 
     async def handler(update, orders: Orders = Depends(make_orders)): ...
 
-    assert type_mismatches(handler, Providers(), skip={"update"}) == [
+    assert type_mismatches(handler, Providers()) == [
         ("orders", Orders, str)
     ]
 
@@ -345,7 +345,7 @@ def test_nothing_is_reported_where_subclassing_cannot_decide():
         unhinted: Orders,
     ): ...
 
-    assert type_mismatches(handler, providers, skip={"update"}) == []
+    assert type_mismatches(handler, providers) == []
 
 
 def test_an_unresolvable_signature_is_left_alone():

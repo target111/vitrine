@@ -112,9 +112,17 @@ class ArgSpec:
     greedy: bool
     default: Any = None
 
+    @property
+    def label(self) -> str:
+        """The argument's name as the usage line spells it, trailing dots and all.
+
+        Shared with ``/help <command>``'s argument list so the heading and the
+        bullets below it cannot disagree about how a greedy argument is named.
+        """
+        return f"{self.name}..." if self.greedy else self.name
+
     def placeholder(self) -> str:
-        inner = f"{self.name}..." if self.greedy else self.name
-        return f"<{inner}>" if self.required else f"[{inner}]"
+        return f"<{self.label}>" if self.required else f"[{self.label}]"
 
 
 def build_arg_specs(fn: Callable[..., Any], skip: Set[str]) -> list[ArgSpec]:

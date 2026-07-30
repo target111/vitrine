@@ -79,10 +79,10 @@ from .exceptions import ConfigurationError
 from .injection import resolve_kwargs, unresolvable_params
 from .middleware import Middleware
 from .routing import (
-    DEFAULT_MESSAGE_FILTERS,
     Registration,
+    command_filters,
     doc_summary,
-    update_filters,
+    message_filters,
     validate_command_name,
 )
 from .screens import Screen
@@ -170,6 +170,15 @@ class Conversation:
 
     # -- declaration -------------------------------------------------------------
 
+    def _check_command(self, command: str | None) -> None:
+        """Reject a name Telegram would refuse, at decoration time.
+
+        Every decorator that takes a ``command`` funnels through here, so the
+        owner string is written once and a new one cannot forget the check.
+        """
+        if command is not None:
+            validate_command_name(command, f"conversation {self.name!r}")
+
     def entry(
         self,
         command: str | None = None,
@@ -196,8 +205,7 @@ class Conversation:
             raise ConfigurationError(
                 "conversation entry needs a command, callback, or filters"
             )
-        if command is not None:
-            validate_command_name(command, f"conversation {self.name!r}")
+        self._check_command(command)
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             desc = doc_summary(fn) if description is None else description
@@ -239,8 +247,7 @@ class Conversation:
         """
         if not names:
             raise ConfigurationError("conversation state needs at least one name")
-        if command is not None:
-            validate_command_name(command, f"conversation {self.name!r}")
+        self._check_command(command)
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self._steps.append(
@@ -262,7 +269,7 @@ class Conversation:
         self, command: str = "cancel"
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """A fallback command that cancels the run (exit hook gets CANCELLED)."""
-        validate_command_name(command, f"conversation {self.name!r}")
+        self._check_command(command)
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self._steps.append(_Step(fn, command=command, is_fallback=True))
@@ -477,17 +484,13 @@ class Conversation:
     ) -> Any:
         if step.command is not None:
             return CommandHandler(
-                step.command, callback, filters=update_filters(None, edits=step.edits)
+                step.command, callback, filters=command_filters(edits=step.edits)
             )
 
         if step.callback is not None:
             return CallbackQueryHandler(callback, pattern=step.callback.matches)
 
-        message_filters = step.filters
-        if message_filters is None:
-            message_filters = DEFAULT_MESSAGE_FILTERS
-
-        return MessageHandler(update_filters(message_filters, edits=step.edits), callback)
+        return MessageHandler(message_filters(step.filters, edits=step.edits), callback)
 
     def _make_callback(
         self,

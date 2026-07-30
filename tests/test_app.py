@@ -40,6 +40,14 @@ def make_bot(**kwargs) -> Bot:
     return Bot(token="123:TEST", **kwargs)
 
 
+async def help_text(bot, arg: str = "", *, user_id: int = 1) -> str:
+    help_reg = next(r for r in bot._registrations if r.command == "help")
+    screen = await help_reg.fn(make_update(user_id=user_id), make_context(), arg)
+    text, _ = screen.content()
+
+    return text.replace("\\", "")  # markdown escaping is not what these assert
+
+
 def command_handler(wired, command: str) -> CommandHandler:
     return next(
         handler
@@ -186,24 +194,12 @@ async def test_help_screen_respects_scopes():
     async def secret(update): ...
 
     bot._wire_handlers()
-    help_reg = next(r for r in bot._registrations if r.command == "help")
 
-    admin_screen = await help_reg.fn(make_update(user_id=1), make_context())
-    text, _ = admin_screen.content()
-    assert "/start" in text.replace("\\", "") and "/ban" in text.replace("\\", "")
-    assert "secret" not in text
+    admin = await help_text(bot, user_id=1)
+    assert "/start" in admin and "/ban" in admin
+    assert "secret" not in admin
 
-    user_screen = await help_reg.fn(make_update(user_id=2), make_context())
-    text, _ = user_screen.content()
-    assert "/ban" not in text.replace("\\", "")
-
-
-async def help_text(bot, arg: str = "", *, user_id: int = 1) -> str:
-    help_reg = next(r for r in bot._registrations if r.command == "help")
-    screen = await help_reg.fn(make_update(user_id=user_id), make_context(), arg)
-    text, _ = screen.content()
-
-    return text.replace("\\", "")  # markdown escaping is not what these assert
+    assert "/ban" not in await help_text(bot, user_id=2)
 
 
 async def test_help_for_one_command_shows_usage_and_docs():
@@ -370,10 +366,8 @@ async def test_conversation_entry_commands_reach_help(fake_bot):
     # it is handled by the ConversationHandler, not by a second CommandHandler
     assert [type(h) for h, _ in wired].count(CommandHandler) == 1  # only auto-/help
 
-    help_reg = next(r for r in bot._registrations if r.command == "help")
-    screen = await help_reg.fn(make_update(user_id=1), make_context())
-    text, _ = screen.content()
-    assert "/order" in text.replace("\\", "")
+    text = await help_text(bot)
+    assert "/order" in text
     assert "Place an order" in text
 
 
@@ -418,6 +412,35 @@ async def test_a_chat_that_leaves_a_scope_loses_its_menu(fake_bot):
     (cleared,) = fake_bot.calls_to("delete_my_commands")
     assert cleared["scope"].chat_id == 7
     assert published == set()
+
+
+async def test_known_scope_chats_are_only_seeded_once(monkeypatch):
+    """They exist to recover what a *restart* forgot. Re-seeding them on every
+    call would re-delete each historical chat's menu forever -- one API
+    round-trip per chat, per call -- and re-run the resolver each time."""
+    resolved = []
+    seen: list[set[int]] = []
+
+    def history():
+        resolved.append(1)
+        return [100, 101, 102]
+
+    async def fake_sync(tg_bot, regs, scope_chat_ids, *, published_chats=frozenset()):
+        seen.append(set(published_chats))
+        return {7}  # what this sync leaves published
+
+    monkeypatch.setattr(command_discovery, "sync_command_menus", fake_sync)
+    bot = make_bot(scope_chats={"admin": [7]}, known_scope_chats=history)
+
+    @bot.command("ban", description="Ban a user", scope="admin")
+    async def ban(update): ...
+
+    await bot.sync_commands()
+    await bot.sync_commands()
+
+    assert seen[0] == {100, 101, 102}
+    assert seen[1] == {7}  # only what we actually published, not the history
+    assert resolved == [1]  # the (often DB-backed) resolver ran once
 
 
 async def test_a_menu_delete_that_fails_is_retried_next_sync(fake_bot):
@@ -546,10 +569,7 @@ async def test_a_hidden_conversation_entry_stays_out_of_help(fake_bot):
     bot.conversation(conv)
     bot._wire_handlers()
 
-    help_reg = next(r for r in bot._registrations if r.command == "help")
-    screen = await help_reg.fn(make_update(user_id=1), make_context())
-    text, _ = screen.content()
-    assert "secret" not in text
+    assert "secret" not in await help_text(bot)
 
 
 async def test_exclusive_conversations_are_linked_across_routers(fake_bot):
