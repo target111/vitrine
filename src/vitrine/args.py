@@ -33,6 +33,29 @@ class Greedy(str):
 _TRUE = {"1", "true", "yes", "y", "on"}
 _FALSE = {"0", "false", "no", "n", "off"}
 
+_TYPE_LABELS: dict[Any, str] = {
+    int: "integer",
+    float: "number",
+    bool: "yes/no",
+    str: "text",
+    Greedy: "text",
+}
+
+
+def type_label(annotation: Any) -> str:
+    """What an argument's type is called when talking to a user.
+
+    Used by conversion errors and by ``/help <command>``, so the two agree on
+    what the user was supposed to send.
+    """
+    if annotation is inspect.Parameter.empty or annotation is Any:
+        return "text"
+
+    try:
+        return _TYPE_LABELS[annotation]
+    except (KeyError, TypeError):  # unhashable annotations exist
+        return str(getattr(annotation, "__name__", annotation))
+
 
 def _convert(raw: str, annotation: Any, name: str) -> Any:
     if annotation in (inspect.Parameter.empty, str, Greedy, Any):
@@ -59,8 +82,7 @@ def _convert(raw: str, annotation: Any, name: str) -> Any:
     try:
         return annotation(raw)
     except (ValueError, TypeError) as exc:
-        labels = {int: "integer", float: "number"}
-        kind = labels.get(annotation, getattr(annotation, "__name__", str(annotation)))
+        kind = type_label(annotation)
         raise UsageError("", hint=f"{name} must be a valid {kind} (got {raw!r})") from exc
 
 

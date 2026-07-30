@@ -67,6 +67,8 @@ async def view_order(data: OrderCB, user: User, orders: OrderService, session):
 
 Dependencies are resolved once per handler call. Bad parameter names fail at startup, not production. `Depends(fn)` is available for explicit one-offs.
 
+Injection is by name, so an annotation on an injected parameter is documentation rather than a contract — but when it provably disagrees with what the provider hands over (`count: int` against a provider returning `str`), you get a warning at startup on the `vitrine.build` logger instead of an `AttributeError` deep inside the handler. Only clear-cut cases are reported: protocols, generics, unions and unannotated factories are left alone, so a duck-typed stand-in keeps working. `Bot(strict_types=True)` turns the warning into a build failure.
+
 ### Identity & auth (`vitrine.auth`)
 
 You define the principal type. The framework handles resolve-once-per-update, caching, injection, and guards:
@@ -146,7 +148,7 @@ Workers get DI, start after init, and shut down gracefully. Crashes restart auto
 | Rate limiting | `ratelimit` | `@throttle(3, per=60)`, custom keys and custom behavior on limits. |
 | Logging | `logging` | Key=value format, one line per update, `audit()` convention. |
 | Errors | `errors` | `@bot.on_error(Type)` registry dispatched by MRO. Handlers can return a `Screen` to render into the current message. |
-| Command discovery | `commands` | Auto `/help` filtered by caller's scopes. `set_my_commands()` per scope, with the menus of chats that have left a scope deleted rather than left stale; `bot.sync_commands()` republishes without a restart. `hidden=True` for internal handlers. |
+| Command discovery | `commands` | Auto `/help` filtered by caller's scopes, and `/help <command>` for one command's usage, docstring, arguments and requirements. `set_my_commands()` per scope, with the menus of chats that have left a scope deleted rather than left stale; `bot.sync_commands()` republishes without a restart. `hidden=True` for internal handlers. |
 | Middleware | `middleware` | `async def mw(event, call_next)` at bot or router scope. `event.extras` values become injectable. |
 
 ## Example: scaled mode
@@ -161,4 +163,4 @@ Not a fork or parallel dispatcher. `bot.build()` returns the PTB `Application` f
 
 ## Testing
 
-Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 139 tests that exercise dispatch and conversations the same way you can.
+Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 157 tests that exercise dispatch and conversations the same way you can.

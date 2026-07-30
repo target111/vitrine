@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from conftest import FakeQuery, make_context, make_ptb_update, make_update
-from telegram import BotCommandScopeChat
+from telegram import BotCommandScopeChat, Update
 from telegram.ext import (
     ApplicationHandlerStop,
+    CallbackContext,
     CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
@@ -14,7 +17,17 @@ from telegram.ext import (
 )
 from telegram.ext import filters as ptb_filters
 
-from vitrine import Auth, Bot, CallbackData, Conversation, ExitReason, Router
+from vitrine import (
+    Auth,
+    Bot,
+    CallbackData,
+    Conversation,
+    ExitReason,
+    Greedy,
+    Router,
+    requires,
+    throttle,
+)
 from vitrine import commands as command_discovery
 from vitrine.exceptions import ConfigurationError
 
@@ -77,6 +90,47 @@ def test_unresolvable_handler_param_fails_at_build_time():
 
     with pytest.raises(ConfigurationError, match="mystery_service"):
         bot._wire_handlers()
+
+
+def test_a_contradicted_annotation_warns_but_still_builds(caplog):
+    """Injection is by name, so a duck-typed stand-in is legitimate: say so
+    loudly at startup rather than reject an app that works."""
+    bot = make_bot()
+    bot.provide_value("count", "5")
+
+    @bot.command("tally")
+    async def tally(update, count: int): ...
+
+    with caplog.at_level(logging.WARNING, logger="vitrine.build"):
+        bot._wire_handlers()
+
+    assert "annotates 'count' as int" in caplog.text
+    assert "supplies str" in caplog.text
+
+
+def test_strict_types_promotes_the_warning_to_a_build_failure():
+    bot = make_bot(strict_types=True)
+    bot.provide_value("count", "5")
+
+    @bot.command("tally")
+    async def tally(update, count: int): ...
+
+    with pytest.raises(ConfigurationError, match="annotates 'count' as int"):
+        bot._wire_handlers()
+
+
+def test_framework_supplied_and_argument_annotations_are_not_type_checked(caplog):
+    """`update: Update` and command arguments have their own machinery; the
+    provider check must not second-guess either."""
+    bot = make_bot(strict_types=True)
+
+    @bot.command("pay")
+    async def pay(update: Update, context: CallbackContext, amount: int): ...
+
+    with caplog.at_level(logging.WARNING, logger="vitrine.build"):
+        bot._wire_handlers()
+
+    assert caplog.text == ""
 
 
 def test_provider_registration_forms():
@@ -142,6 +196,143 @@ async def test_help_screen_respects_scopes():
     user_screen = await help_reg.fn(make_update(user_id=2), make_context())
     text, _ = user_screen.content()
     assert "/ban" not in text.replace("\\", "")
+
+
+async def help_text(bot, arg: str = "", *, user_id: int = 1) -> str:
+    help_reg = next(r for r in bot._registrations if r.command == "help")
+    screen = await help_reg.fn(make_update(user_id=user_id), make_context(), arg)
+    text, _ = screen.content()
+
+    return text.replace("\\", "")  # markdown escaping is not what these assert
+
+
+async def test_help_for_one_command_shows_usage_and_docs():
+    bot = make_bot()
+
+    @bot.command("pay")
+    @throttle(3, per=60)
+    async def pay(update, amount: float, target: str = "self", note: Greedy = Greedy("")):
+        """Send credits to another user.
+
+        The transfer clears instantly and cannot be undone.
+        """
+
+    bot._wire_handlers()
+    text = await help_text(bot, "pay")
+
+    assert "/pay <amount> [target] [note...]" in text
+    assert "Send credits to another user." in text
+    assert "cannot be undone" in text  # the rest of the docstring, not just line 1
+    assert "amount` — number, required" in text
+    assert "target` — text, optional, defaults to self" in text
+    assert "note...` — rest of the message, optional" in text
+    assert "Limit*: 3 per 60s" in text
+
+
+async def test_help_for_one_command_shows_what_it_takes_to_run():
+    class U:
+        def __init__(self, admin):
+            self.admin = admin
+
+    async def resolver(update):
+        return U(admin=True)
+
+    bot = make_bot(
+        auth=Auth(resolver, name="user", is_admin=lambda u: u.admin),
+        scope_chats={"admin": [1]},
+    )
+
+    @bot.command("grant", description="Grant a role", scope="admin")
+    @requires("support")
+    async def grant(user, tg_id: int): ...
+
+    bot._wire_handlers()
+    text = await help_text(bot, "grant")
+
+    assert "Scope*: admin" in text
+    assert "Requires*: support" in text
+
+
+async def test_help_for_an_out_of_scope_command_says_it_does_not_exist():
+    """Answering "you may not" would still confirm that /ban is a command."""
+
+    class U:
+        def __init__(self, admin):
+            self.admin = admin
+
+    async def resolver(update):
+        return U(admin=update.effective_user.id == 1)
+
+    bot = make_bot(
+        auth=Auth(resolver, name="user", is_admin=lambda u: u.admin),
+        scope_chats={"admin": [1]},
+    )
+
+    @bot.command("ban", description="Ban a user", scope="admin")
+    async def ban(update, tg_id: int): ...
+
+    bot._wire_handlers()
+
+    stranger = make_bot()  # a bot with no /ban at all
+    stranger._wire_handlers()
+
+    assert "/ban <tg_id>" in await help_text(bot, "ban", user_id=1)
+    assert await help_text(bot, "ban", user_id=2) == await help_text(stranger, "ban")
+
+
+async def test_help_accepts_a_command_as_users_write_it():
+    bot = make_bot()
+
+    @bot.command("start", description="Begin")
+    async def start(update): ...
+
+    bot._wire_handlers()
+    for written in ("start", "/start", "/Start@mybot", "  start  "):
+        assert "Begin" in await help_text(bot, written)
+
+
+async def test_help_for_a_hidden_command_says_it_does_not_exist():
+    bot = make_bot()
+
+    @bot.command("debug", hidden=True)
+    async def debug(update): ...
+
+    bot._wire_handlers()
+
+    assert "No command" in await help_text(bot, "debug")
+
+
+async def test_help_for_a_conversation_entry_shows_no_arguments():
+    """The entry registration exists to be discovered; the step that actually
+    runs is a message handler, and the flow asks for what it needs."""
+    bot = make_bot()
+    conv = Conversation("t_argless_conv")
+
+    @conv.entry(command="order", description="Place an order")
+    async def order(update, page=1): ...
+
+    @conv.state("item")
+    async def item(update): ...
+
+    bot.conversation(conv)
+    bot._wire_handlers()
+    text = await help_text(bot, "order")
+
+    assert "/order" in text
+    assert "page" not in text and "Arguments" not in text
+
+
+async def test_bare_help_still_lists_everything():
+    bot = make_bot()
+
+    @bot.command("start", description="Begin")
+    async def start(update): ...
+
+    bot._wire_handlers()
+    text = await help_text(bot)
+
+    assert "Available commands" in text and "/start" in text
+    assert "/help <command>" in text  # discoverable, or nobody finds the feature
 
 
 async def test_visible_scopes_closes_provider_cleanups():

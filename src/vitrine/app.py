@@ -80,6 +80,7 @@ class Bot(Generic[P]):
         known_scope_chats: ScopeChats | None = None,
         scope_member: Callable[[str, P | None], bool] | None = None,
         context_type: type[CallbackContext] | None = None,
+        strict_types: bool = False,
     ) -> None:
         self.token = token
         self.auth = auth
@@ -94,6 +95,9 @@ class Bot(Generic[P]):
         self._known_scope_chats = known_scope_chats
         self._scope_member = scope_member
         self._context_type = context_type or VitrineContext
+        #: fail the build, rather than log, when a handler's annotation and its
+        #: provider provably disagree -- see ``Dispatch._check_types``
+        self._strict_types = strict_types
 
         self.router = Router("root")
         self.providers = Providers()
@@ -240,7 +244,12 @@ class Bot(Generic[P]):
     def _make_dispatch(self) -> Dispatch:
         if self._dispatch is None:
             self._dispatch = Dispatch(
-                self.providers, self.errors, self.limiter, self.auth, self._middlewares
+                self.providers,
+                self.errors,
+                self.limiter,
+                self.auth,
+                self._middlewares,
+                self._strict_types,
             )
 
         return self._dispatch
@@ -342,16 +351,31 @@ class Bot(Generic[P]):
     # -- auto /help ---------------------------------------------------------------
 
     def _help_registration(self) -> Registration:
-        async def help_command(update: Any, context: Any) -> Any:
+        async def help_command(update: Any, context: Any, command: str = "") -> Any:
+            """Show available commands.
+
+            Name one of them, as in /help pay, to see that command in full
+            instead: how to call it, what each argument takes, and what you
+            need in order to run it.
+            """
             scopes = await self._visible_scopes(update, context)
-            return command_discovery.help_screen(self._registrations, scopes)
+            if not command:
+                return command_discovery.help_screen(self._registrations, scopes)
+
+            reg = command_discovery.find_command(self._registrations, command, scopes)
+            if reg is None:
+                return command_discovery.unknown_command_screen(command)
+
+            specs = self._make_dispatch().arg_specs(reg) if reg.parses_args else []
+
+            return command_discovery.command_help_screen(reg, specs)
 
         return Registration(
             kind="command",
             fn=help_command,
             name="help",
             command="help",
-            description="Show available commands",
+            description="Show commands, or one command in full",
         )
 
     async def _visible_scopes(self, update: Any, context: Any) -> set[str]:

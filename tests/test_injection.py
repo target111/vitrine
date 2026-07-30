@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import Protocol, runtime_checkable
+
+import deferred_annotations
 import pytest
 from conftest import make_context, make_dispatch, make_update
 
@@ -12,7 +16,13 @@ from vitrine.exceptions import (
     NotAuthorizedError,
     NotRegisteredError,
 )
-from vitrine.injection import Depends, Invocation, Providers, resolve_kwargs
+from vitrine.injection import (
+    Depends,
+    Invocation,
+    Providers,
+    resolve_kwargs,
+    type_mismatches,
+)
 from vitrine.routing import Registration
 
 
@@ -235,6 +245,116 @@ def test_requires_principal_check_directly():
     auth.check(handler, Principal())
     with pytest.raises(NotRegisteredError):
         auth.check(handler, None)
+
+
+# -- provider/annotation agreement --------------------------------------------
+#
+# Defined at module level on purpose: this module uses PEP 563, so a class
+# declared inside a test function is not resolvable from the signature and the
+# check would skip the case rather than judge it.
+
+
+class Orders:
+    pass
+
+
+class SqlOrders(Orders):
+    pass
+
+
+class FakeOrders:  # a stand-in, deliberately not a subclass
+    pass
+
+
+@runtime_checkable
+class Catalog(Protocol):
+    def items(self) -> list: ...
+
+
+class RealCatalog:
+    def items(self) -> list:
+        return []
+
+
+def test_a_provided_value_that_contradicts_the_annotation_is_reported():
+    providers = Providers()
+    providers.register_value("orders", "not a service")
+
+    async def handler(update, orders: Orders): ...
+
+    assert type_mismatches(handler, providers, skip={"update"}) == [
+        ("orders", Orders, str)
+    ]
+
+
+def test_a_factory_is_judged_by_what_it_says_it_returns():
+    providers = Providers()
+
+    async def make_orders() -> str: ...
+
+    async def make_session() -> AsyncIterator[str]:
+        yield "s"
+
+    providers.register("orders", make_orders)
+    providers.register("session", make_session)
+
+    async def handler(update, orders: Orders, session: Orders): ...
+
+    assert type_mismatches(handler, providers, skip={"update"}) == [
+        ("orders", Orders, str),
+        ("session", Orders, str),  # the yielded type, not the generator
+    ]
+
+
+def test_an_explicit_depends_is_judged_the_same_way():
+    async def make_orders() -> str: ...
+
+    async def handler(update, orders: Orders = Depends(make_orders)): ...
+
+    assert type_mismatches(handler, Providers(), skip={"update"}) == [
+        ("orders", Orders, str)
+    ]
+
+
+def test_nothing_is_reported_where_subclassing_cannot_decide():
+    """Every one of these would be a false positive, and a false positive here
+    rejects an app that works."""
+    providers = Providers()
+    providers.register_value("catalog", RealCatalog())  # satisfies a protocol
+    providers.register_value("tags", ["a"])  # generic annotation
+    providers.register_value("maybe", None)  # union annotation
+    providers.register_value("ratio", 1)  # int where float is asked
+    providers.register_value("flag", True)  # bool is an int
+    providers.register_value("orders", SqlOrders())  # a subclass
+    providers.register_value("loose", "anything")  # unannotated
+
+    async def unhinted():
+        return "x"
+
+    providers.register("unhinted", unhinted)  # promises nothing
+
+    async def handler(
+        update,
+        catalog: Catalog,
+        tags: list[str],
+        maybe: int | None,
+        ratio: float,
+        flag: int,
+        orders: Orders,
+        loose,
+        unhinted: Orders,
+    ): ...
+
+    assert type_mismatches(handler, providers, skip={"update"}) == []
+
+
+def test_an_unresolvable_signature_is_left_alone():
+    """Issue #1's shape: one TYPE_CHECKING-only annotation makes the whole
+    signature unevaluable, and guessing from it is worse than not checking."""
+    providers = Providers()
+    providers.register_value("tag", 1)  # would contradict `tag: str`
+
+    assert type_mismatches(deferred_annotations.note, providers) == []
 
 
 def test_role_guards_report_unregistered_not_unauthorized():

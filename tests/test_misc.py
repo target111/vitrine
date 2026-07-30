@@ -13,6 +13,7 @@ from vitrine.injection import Depends, Invocation, Providers
 from vitrine.markdown import Md, bold, code, escape, italic, link, raw
 from vitrine.pagination import ListSource, Paginator, nav_row
 from vitrine.ratelimit import _SWEEP_EVERY, RateLimiter
+from vitrine.routing import doc_body, doc_summary
 from vitrine.screens import NOOP, Delivery
 
 # ------------------------------------------------------------------- markdown
@@ -136,6 +137,65 @@ def test_a_depends_parameter_is_not_a_command_argument():
     assert usage_string("grant", specs) == "/grant <tg_id>"
     with pytest.raises(UsageError, match="too many"):
         parse_args("grant", specs, "7 sneaks-into-service")
+
+
+def test_doc_body_is_everything_after_the_summary():
+    def documented():
+        """Send credits.
+
+        Cleared instantly.
+            Indented, and kept that way.
+        """
+
+    def summary_only():
+        """Send credits."""
+
+    def blank():
+        """
+        """
+
+    assert doc_body(documented) == "Cleared instantly.\n    Indented, and kept that way."
+    assert doc_body(summary_only) == ""
+    assert doc_body(blank) == ""
+    assert doc_body(test_doc_body_is_everything_after_the_summary) == ""
+
+
+def test_a_wrapped_summary_is_not_cut_at_the_line_break():
+    """It is one sentence in the source and must stay one in the description --
+    which goes to /help *and* to Telegram's command menu."""
+
+    def wrapped():
+        """Send credits to another user, clearing instantly and
+        irreversibly.
+
+        The note shows up on both statements.
+        """
+
+    assert doc_summary(wrapped) == (
+        "Send credits to another user, clearing instantly and irreversibly."
+    )
+    assert doc_body(wrapped) == "The note shows up on both statements."
+
+
+def test_doc_summary_edge_cases():
+    def leading_newline():
+        """
+        Place an order.
+
+        The rest is not the description.
+        """
+
+    def summary_only():
+        """Check that the bot is alive."""
+
+    def blank():
+        """
+        """
+
+    assert doc_summary(leading_newline) == "Place an order."
+    assert doc_summary(summary_only) == "Check that the bot is alive."
+    assert doc_summary(blank) == ""
+    assert doc_summary(test_doc_summary_edge_cases) == ""
 
 
 def test_bool_conversion():

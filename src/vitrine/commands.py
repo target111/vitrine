@@ -5,6 +5,8 @@ Commands carry metadata at registration (``description``, ``scope``,
 
 - a ``/help`` screen listing what the *caller* can see (admins see admin
   commands), with ``hidden=True`` handlers (entry-only, internal) left out;
+- a ``/help <command>`` screen for one of them: usage line, the handler's
+  docstring, what each argument takes, and what the caller needs to run it;
 - Telegram command menus via ``set_my_commands``: the default scope gets the
   default commands, and each named scope's chats (e.g. every admin's private
   chat) get the default + scoped commands.
@@ -22,8 +24,11 @@ from typing import Any
 
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
+from .args import ArgSpec, type_label, usage_string
+from .auth import guard_summary
 from .markdown import Md, code
-from .routing import Registration
+from .ratelimit import throttle_spec
+from .routing import Registration, doc_body
 from .screens import Screen
 
 logger = logging.getLogger("vitrine.commands")
@@ -55,6 +60,84 @@ def help_screen(regs: Iterable[Registration], visible_scopes: set[str]) -> Scree
             doc.blank().heading(scope.capitalize())
         for reg in by_scope[scope]:
             doc.line(code(f"/{reg.command}"), " — ", reg.description or reg.command or "")
+
+    doc.blank().line("Send ", code("/help <command>"), " for details on one.")
+
+    return Screen(text=doc)
+
+
+def normalize_command(name: str) -> str:
+    """``" /Pay@mybot "`` -> ``"pay"``: what users paste is rarely bare."""
+    return name.strip().lstrip("/").split("@", 1)[0].lower()
+
+
+def find_command(
+    regs: Iterable[Registration], name: str, visible_scopes: Set[str]
+) -> Registration | None:
+    """The command ``name`` refers to, if the caller is allowed to see it.
+
+    Out of scope and non-existent deliberately give the same answer: a user who
+    cannot run ``/ban`` should not learn that it exists by asking about it.
+    """
+    wanted = normalize_command(name)
+
+    return next(
+        (
+            reg
+            for reg in _command_regs(regs)
+            if reg.command == wanted and reg.scope in visible_scopes
+        ),
+        None,
+    )
+
+
+def unknown_command_screen(name: str) -> Screen:
+    doc = Md().line("No command ", code(f"/{normalize_command(name)}"), ".")
+    doc.blank().line("Send ", code("/help"), " for the ones you can use.")
+
+    return Screen(text=doc)
+
+
+def _argument_detail(spec: ArgSpec) -> str:
+    # "rest of the message" already says it is text, and says more.
+    parts = ["rest of the message" if spec.greedy else type_label(spec.annotation)]
+    if spec.required:
+        parts.append("required")
+    elif spec.default in (None, ""):
+        parts.append("optional")
+    else:
+        parts.append(f"optional, defaults to {spec.default}")
+
+    return ", ".join(parts)
+
+
+def command_help_screen(reg: Registration, specs: Sequence[ArgSpec]) -> Screen:
+    """Detail for one command: how to call it, what it does, what it needs."""
+    doc = Md().heading(code(usage_string(reg.command or "", list(specs))))
+
+    if reg.description:
+        doc.blank().line(reg.description)
+    body = doc_body(reg.fn)
+    if body:
+        doc.blank().line(body)
+
+    if specs:
+        doc.blank().heading("Arguments")
+        for spec in specs:
+            # named as the usage line names it, trailing dots and all
+            name = f"{spec.name}..." if spec.greedy else spec.name
+            doc.bullet(code(name), " — ", _argument_detail(spec))
+
+    requires = guard_summary(reg.fn)
+    limit = throttle_spec(reg.fn)
+    if reg.scope != "default" or requires or limit is not None:
+        doc.blank()
+        if reg.scope != "default":
+            doc.kv("Scope", reg.scope)
+        if requires:
+            doc.kv("Requires", requires)
+        if limit is not None:
+            doc.kv("Limit", f"{limit.limit} per {limit.per:g}s")
 
     return Screen(text=doc)
 

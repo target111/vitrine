@@ -23,9 +23,9 @@ Everything is resolved at most once per invocation and cached.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Set
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Set
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args, get_origin
 
 from .exceptions import InjectionError
 
@@ -223,5 +223,128 @@ def unresolvable_params(
         if name in RESERVED_NAMES or name in extra_names or name in providers:
             continue
         bad.append(name)
+
+    return bad
+
+
+# -- provider/annotation agreement ---------------------------------------------
+#
+# Injection is by name, so an annotation on an injected parameter is
+# documentation rather than a contract -- but when it plainly disagrees with
+# what the provider hands over, the handler fails somewhere downstream with an
+# AttributeError that names neither the parameter nor the provider. What
+# follows reports that disagreement at build time, and only where a subclass
+# test can settle it: everything else falls through unjudged, because a false
+# positive here would reject a working app.
+
+#: implicit conversions Python makes and annotations are expected to allow
+_NUMERIC_TOWER: dict[type, tuple[type, ...]] = {float: (int,), complex: (int, float)}
+
+
+def _nominal_class(annotation: Any) -> type | None:
+    """``annotation`` as a class ``issubclass`` can judge, else ``None``.
+
+    ``Any``, unions, generics (``list[Order]``, ``int | None``), unresolved
+    forward references and protocols all mean "not decidable by subclassing" --
+    a protocol most of all, since satisfying one is exactly what a stand-in
+    that fails ``issubclass`` does.
+    """
+    if annotation is inspect.Parameter.empty or annotation is Any:
+        return None
+    if isinstance(annotation, str):  # a PEP 563 string nothing could resolve
+        return None
+    if get_origin(annotation) is not None:
+        return None
+    if not isinstance(annotation, type):
+        return None
+    if getattr(annotation, "_is_protocol", False):
+        return None
+
+    return annotation
+
+
+def _resolved_signature(fn: Callable[..., Any]) -> inspect.Signature | None:
+    """``fn``'s signature with real types, or ``None`` if they cannot be had.
+
+    A ``TYPE_CHECKING``-only annotation anywhere makes the whole signature
+    unevaluable; giving up on the function is right, since no check at all is
+    always safe and guessing is not.
+    """
+    try:
+        return inspect.signature(fn, eval_str=True)
+    except Exception:  # noqa: BLE001 - any failure means "cannot judge"
+        return None
+
+
+def _yielded_class(annotation: Any) -> type | None:
+    """The ``X`` an ``AsyncIterator[X]``/``AsyncGenerator[X, ...]`` provider yields."""
+    if get_origin(annotation) not in (AsyncIterator, AsyncGenerator):
+        return None
+    args = get_args(annotation)
+
+    return _nominal_class(args[0]) if args else None
+
+
+def _factory_supplies(factory: Callable[..., Any]) -> type | None:
+    """What ``factory`` promises to return, when it promises anything."""
+    signature = _resolved_signature(factory)
+    if signature is None:
+        return None
+
+    annotation = signature.return_annotation
+    if inspect.isasyncgenfunction(factory):
+        return _yielded_class(annotation)
+
+    return _nominal_class(annotation)
+
+
+def _supplied_class(name: str, providers: Providers) -> type | None:
+    value = providers.value(name)
+    if value is not _MISSING:
+        return type(value)
+
+    factory = providers.factory(name)
+
+    return _factory_supplies(factory) if factory is not None else None
+
+
+def type_mismatches(
+    fn: Callable[..., Any],
+    providers: Providers,
+    *,
+    skip: Set[str] = frozenset(),
+) -> list[tuple[str, type, type]]:
+    """``(parameter, annotated, supplied)`` for each provably wrong annotation.
+
+    Empty whenever anything is uncertain -- an unevaluable signature, a
+    protocol, a generic, a factory that annotates no return type.
+    """
+    signature = _resolved_signature(fn)
+    if signature is None:
+        return []
+
+    bad: list[tuple[str, type, type]] = []
+    for param in signature.parameters.values():
+        if param.name in skip or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+
+        wanted = _nominal_class(param.annotation)
+        if wanted is None:
+            continue
+
+        if isinstance(param.default, Depends):
+            supplied = _factory_supplies(param.default.factory)
+        else:
+            supplied = _supplied_class(param.name, providers)
+        if supplied is None:
+            continue
+
+        try:
+            if issubclass(supplied, wanted) or supplied in _NUMERIC_TOWER.get(wanted, ()):
+                continue
+        except TypeError:  # an exotic metaclass; not ours to judge
+            continue
+
+        bad.append((param.name, wanted, supplied))
 
     return bad

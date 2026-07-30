@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Set
 from typing import Any
 
 from telegram.error import TelegramError
@@ -26,6 +26,7 @@ from .injection import (
     Invocation,
     Providers,
     resolve_kwargs,
+    type_mismatches,
     unresolvable_params,
 )
 from .logging import log_event
@@ -35,6 +36,7 @@ from .routing import Registration
 from .screens import Delivery, Screen
 
 logger = logging.getLogger("vitrine.update")
+build_logger = logging.getLogger("vitrine.build")
 
 EXPIRED_BUTTON_TEXT = "This button has expired."
 
@@ -58,12 +60,14 @@ class Dispatch:
         limiter: RateLimiter,
         auth: Auth | None = None,
         middlewares: list[Middleware] | None = None,
+        strict_types: bool = False,
     ) -> None:
         self.providers = providers
         self.errors = errors
         self.limiter = limiter
         self.auth = auth
         self.middlewares = middlewares or []  # bot-scoped, outermost
+        self.strict_types = strict_types
         self.delivery: Delivery | None = None  # attached at build time
         self._arg_specs: dict[int, list[ArgSpec]] = {}
 
@@ -104,6 +108,30 @@ class Dispatch:
             raise ConfigurationError(
                 f"handler {reg.name!r} declares parameter(s) {bad} that nothing can "
                 f"supply: not reserved, not a provider, not a command argument"
+            )
+
+        self._check_types(reg, skip=RESERVED_NAMES | extra)
+
+    def _check_types(self, reg: Registration, *, skip: Set[str]) -> None:
+        """Report annotations the provider demonstrably cannot satisfy.
+
+        A warning by default: injection is by name, and a hand-written stand-in
+        that fails ``issubclass`` is a legitimate thing to inject -- most of a
+        test suite does it. ``Bot(strict_types=True)`` promotes it to a build
+        failure for apps that would rather have the guarantee.
+        """
+        for name, wanted, supplied in type_mismatches(reg.fn, self.providers, skip=skip):
+            message = (
+                f"handler {reg.name!r} annotates {name!r} as {wanted.__name__}, but "
+                f"its provider supplies {supplied.__name__}"
+            )
+            if self.strict_types:
+                raise ConfigurationError(message)
+
+            build_logger.warning(
+                "%s. Annotate what the provider returns, or drop the annotation; "
+                "Bot(strict_types=True) makes this an error.",
+                message,
             )
 
     def ptb_callback(

@@ -8,9 +8,23 @@ Notable changes to vitrine. The format follows
 
 ### Added
 
+- `/help <command>` shows one command in full: its usage line, the whole
+  handler docstring rather than the summary the list has room for, what each
+  argument takes and defaults to, and the scope, guards and rate limit that
+  govern it. A command the caller cannot see answers exactly as one that does
+  not exist, so `/help ban` reveals nothing to a non-admin.
+
 - `edits=True` on `@router.command`, `@router.message`, `@conv.entry` and
   `@conv.state` opts a handler into edited messages, which it no longer sees
   by default.
+- Build-time check that an injected parameter's annotation and its provider
+  agree: `@bot.provide("count")` returning `str` under `count: int` is now a
+  warning on the `vitrine.build` logger at startup instead of an
+  `AttributeError` somewhere inside the handler later. Only reported where a
+  subclass test settles it -- protocols, generics, unions, unannotated
+  factories and signatures with `TYPE_CHECKING`-only names are all left alone,
+  since injection is by name and a duck-typed stand-in is legitimate.
+  `Bot(strict_types=True)` makes it a `ConfigurationError` instead.
 - `Bot.sync_commands()` republishes the Telegram command menus on demand, so
   promoting an admin can update their menu without a restart.
 - `Bot(known_scope_chats=...)` names the chats that may still carry a
@@ -18,8 +32,19 @@ Notable changes to vitrine. The format follows
   forgotten. Clearing a chat that has no menu is a no-op, so a generous set --
   every chat a scope has ever resolved to -- is safe.
 
+### Changed
+
+- `vitrine.routing.first_doc_line` is now `doc_summary`, since it returns the
+  docstring's first paragraph rather than its first line. Nothing exported
+  from `vitrine` changes.
+
 ### Fixed
 
+- A command description taken from a docstring is no longer cut at the first
+  line break, so a summary that wraps across two source lines stays one
+  sentence in `/help`, in `/help <command>`, and in the description published
+  to Telegram's command menu. The orphaned remainder no longer opens the
+  detail text either.
 - Editing an old message into a command no longer runs that command, and
   editing any old text message no longer re-feeds it to message handlers,
   reply-keyboard handlers, and whichever conversation state is live *now*.

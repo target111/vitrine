@@ -50,9 +50,10 @@ command::
 
 An entry command is a real command: it is listed in ``/help`` and published to
 the Telegram command menu, with the same ``description``/``scope``/``hidden``
-metadata as ``@router.command``. ``exclusive=True`` makes starting this
-conversation end the caller's other exclusive runs, so a half-finished flow
-can't keep matching messages meant for the new one.
+metadata as ``@router.command``. It takes no typed arguments, though -- the
+flow asks for what it needs, one state at a time. ``exclusive=True`` makes
+starting this conversation end the caller's other exclusive runs, so a
+half-finished flow can't keep matching messages meant for the new one.
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ from .middleware import Middleware
 from .routing import (
     DEFAULT_MESSAGE_FILTERS,
     Registration,
-    first_doc_line,
+    doc_summary,
     update_filters,
     validate_command_name,
 )
@@ -185,8 +186,11 @@ class Conversation:
 
         A command entry carries the same menu metadata as ``@router.command``:
         it is listed in ``/help`` and published to the Telegram command menu of
-        its ``scope`` unless ``hidden``. ``edits=True`` lets an edit of an older
-        message start the conversation, which by default it cannot.
+        its ``scope`` unless ``hidden``. It parses no typed arguments, though,
+        so a parameter with a default keeps that default instead of being read
+        off the command line; ask for the value in a state. ``edits=True`` lets
+        an edit of an older message start the conversation, which by default it
+        cannot.
         """
         if command is None and callback is None and filters is None:
             raise ConfigurationError(
@@ -196,7 +200,7 @@ class Conversation:
             validate_command_name(command, f"conversation {self.name!r}")
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
-            desc = first_doc_line(fn) if description is None else description
+            desc = doc_summary(fn) if description is None else description
 
             self._steps.append(
                 _Step(
@@ -271,6 +275,10 @@ class Conversation:
 
         Only entry points: a state's ``/skip`` or the ``/cancel`` fallback do
         nothing outside a live run, so listing them would be noise.
+
+        These are for discovery alone -- the handler that actually runs is the
+        step, built in :meth:`build` -- so they take no typed arguments: the
+        conversation asks for what it needs, one state at a time.
         """
         return [
             Registration(
@@ -281,6 +289,7 @@ class Conversation:
                 description=step.description,
                 scope=step.scope,
                 hidden=step.hidden,
+                parses_args=False,
             )
             for step in self._steps
             if step.is_entry and step.command is not None

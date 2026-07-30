@@ -21,6 +21,7 @@ packages. Raw PTB handlers remain a first-class escape hatch via ``.raw()``.
 
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -81,15 +82,35 @@ def update_filters(filters: Any, *, edits: bool) -> Any:
     return filters & ptb_filters.UpdateType.MESSAGE
 
 
-def first_doc_line(fn: Callable[..., Any]) -> str:
-    """A handler's summary line: the default command description.
+def _doc_parts(fn: Callable[..., Any]) -> tuple[str, str]:
+    """Split a docstring into its summary paragraph and everything after it.
 
-    The first non-blank line of the docstring, or ``""`` when there is nothing
-    to take -- including a docstring that is only whitespace.
+    The split is the first blank line, not the first newline: a summary that
+    wraps across two source lines is still one sentence, and cutting it at the
+    wrap truncated the command description mid-phrase -- in ``/help``, and in
+    the description published to Telegram's command menu.
     """
-    lines = (fn.__doc__ or "").splitlines()
+    summary, _, body = inspect.cleandoc(fn.__doc__ or "").partition("\n\n")
 
-    return next((line.strip() for line in lines if line.strip()), "")
+    return " ".join(summary.split()), body.strip()
+
+
+def doc_summary(fn: Callable[..., Any]) -> str:
+    """A handler's summary: the docstring's first paragraph, as one line.
+
+    The default command description. ``""`` when there is nothing to take,
+    including a docstring that is only whitespace.
+    """
+    return _doc_parts(fn)[0]
+
+
+def doc_body(fn: Callable[..., Any]) -> str:
+    """Everything in the docstring after the summary paragraph, dedented.
+
+    The summary is already the command's one-line description, so this is the
+    detail ``/help <command>`` has room for and the command list does not.
+    """
+    return _doc_parts(fn)[1]
 
 
 @dataclass
@@ -107,6 +128,10 @@ class Registration:
     cb_when: Callable[[CallbackData], bool] | None = None
     filters: Any = None  # PTB filters for message handlers
     edits: bool = False  # also match edited messages
+    #: False for a registration that exists only to be discovered, so
+    #: ``/help <command>`` does not read arguments off a signature that the
+    #: dispatcher never parses -- see ``Conversation.command_registrations``
+    parses_args: bool = True
     group: int = 0
     middlewares: list[Middleware] = field(default_factory=list)
 
@@ -139,7 +164,7 @@ class Router:
         """
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
-            desc = first_doc_line(fn) if description is None else description
+            desc = doc_summary(fn) if description is None else description
 
             self.registrations.append(
                 Registration(
