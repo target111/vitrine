@@ -21,6 +21,7 @@ packages. Raw PTB handlers remain a first-class escape hatch via ``.raw()``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -28,11 +29,56 @@ from typing import TYPE_CHECKING, Any
 from telegram.ext import filters as ptb_filters
 
 from .callbacks import CallbackData
+from .exceptions import ConfigurationError
 from .middleware import Middleware
 from .screens import ReplyButton
 
 if TYPE_CHECKING:
     from .conversations import Conversation
+
+#: what a message handler matches when the caller names no filters
+DEFAULT_MESSAGE_FILTERS = ptb_filters.TEXT & ~ptb_filters.COMMAND
+
+#: Telegram's rule for ``BotCommand.command``
+_COMMAND_NAME = re.compile(r"^[a-z0-9_]{1,32}$")
+
+
+def validate_command_name(command: str, owner: str) -> str:
+    """Reject at registration a command ``setMyCommands`` would refuse.
+
+    PTB's ``CommandHandler`` lowercases a command before it validates it, so
+    ``/myCmd`` dispatches happily while that same name in the published menu
+    makes Telegram reject the *whole* batch -- leaving every menu, in every
+    scope, frozen at what the previous run published, with only a log line to
+    say so. Cheaper as an import-time error.
+    """
+    if not _COMMAND_NAME.match(command):
+        raise ConfigurationError(
+            f"{owner}: {command!r} is not a valid command name. Telegram allows "
+            f"1-32 characters from a-z, 0-9 and underscore -- no uppercase."
+        )
+
+    return command
+
+
+def update_filters(filters: Any, *, edits: bool) -> Any:
+    """Narrow ``filters`` to fresh messages unless the handler wants edits.
+
+    Telegram delivers an edit as a new update carrying the whole message, and
+    PTB's defaults match those too: editing an old ``/help`` into ``/whatever``
+    runs ``/whatever``, and editing any old text message re-feeds it to message
+    handlers -- including whichever conversation state is live *now*, several
+    steps past the one that first read it. Handlers see only fresh messages
+    unless they ask with ``edits=True``.
+
+    ``None`` means "whatever PTB's handler class defaults to".
+    """
+    if edits:
+        return filters
+    if filters is None:
+        return ptb_filters.UpdateType.MESSAGE
+
+    return filters & ptb_filters.UpdateType.MESSAGE
 
 
 def first_doc_line(fn: Callable[..., Any]) -> str:
@@ -60,6 +106,7 @@ class Registration:
     cb_model: type[CallbackData] | None = None
     cb_when: Callable[[CallbackData], bool] | None = None
     filters: Any = None  # PTB filters for message handlers
+    edits: bool = False  # also match edited messages
     group: int = 0
     middlewares: list[Middleware] = field(default_factory=list)
 
@@ -82,9 +129,14 @@ class Router:
         description: str | None = None,
         scope: str = "default",
         hidden: bool = False,
+        edits: bool = False,
         group: int = 0,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Register a ``/command`` handler; extra params become typed arguments."""
+        """Register a ``/command`` handler; extra params become typed arguments.
+
+        ``edits=True`` also fires the handler when a user edits an older
+        message into this command -- off by default, see :func:`update_filters`.
+        """
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             desc = first_doc_line(fn) if description is None else description
@@ -94,10 +146,13 @@ class Router:
                     kind="command",
                     fn=fn,
                     name=fn.__name__,
-                    command=command or fn.__name__,
+                    command=validate_command_name(
+                        command or fn.__name__, f"handler {fn.__name__!r}"
+                    ),
                     description=desc,
                     scope=scope,
                     hidden=hidden,
+                    edits=edits,
                     group=group,
                 )
             )
@@ -136,9 +191,13 @@ class Router:
         return register
 
     def message(
-        self, filters: Any = None, *, group: int = 0
+        self, filters: Any = None, *, edits: bool = False, group: int = 0
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Register a message handler with PTB filters (defaults to text messages)."""
+        """Register a message handler with PTB filters (defaults to text messages).
+
+        ``edits=True`` also fires the handler for edits of older messages --
+        off by default, see :func:`update_filters`.
+        """
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self.registrations.append(
@@ -147,6 +206,7 @@ class Router:
                     fn=fn,
                     name=fn.__name__,
                     filters=filters,
+                    edits=edits,
                     group=group,
                 )
             )

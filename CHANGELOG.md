@@ -4,6 +4,49 @@ Notable changes to vitrine. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `edits=True` on `@router.command`, `@router.message`, `@conv.entry` and
+  `@conv.state` opts a handler into edited messages, which it no longer sees
+  by default.
+- `Bot.sync_commands()` republishes the Telegram command menus on demand, so
+  promoting an admin can update their menu without a restart.
+- `Bot(known_scope_chats=...)` names the chats that may still carry a
+  chat-scoped menu written by an earlier *run*, which a restart has otherwise
+  forgotten. Clearing a chat that has no menu is a no-op, so a generous set --
+  every chat a scope has ever resolved to -- is safe.
+
+### Fixed
+
+- Editing an old message into a command no longer runs that command, and
+  editing any old text message no longer re-feeds it to message handlers,
+  reply-keyboard handlers, and whichever conversation state is live *now*.
+  Telegram delivers an edit as a fresh update and PTB's default filters match
+  those, so `/help` edited into `/whatever` really did run `/whatever`. Pass
+  `edits=True` to keep the old behaviour for a given handler.
+- Chats that leave a command scope get their chat-scoped menu deleted instead
+  of keeping it for good. Telegram stores every scope until something replaces
+  it and lets a chat scope shadow the default one, so a demoted admin -- or
+  everyone, after one restart with a `scope_chats` resolver that came back
+  empty -- kept the menu they were last given and never saw a command added
+  since.
+- A command name Telegram would reject (uppercase, over 32 characters) is now
+  a `ConfigurationError` at registration. PTB's `CommandHandler` lowercases
+  before it validates, so `/myCmd` dispatched normally while the same name
+  made `setMyCommands` reject the whole batch, freezing every menu in every
+  scope at what the previous run published, with only a log line to say so.
+- A command whose `scope` has no chats in `Bot(scope_chats=...)` is now a
+  `ConfigurationError` from `Bot.build()` rather than a command that reaches
+  `/help` and no Telegram menu at all. Only checked when `scope_chats` is
+  configured: without it, `scope` groups `/help` and nothing else.
+- A handler parameter with an explicit `Depends(...)` default is no longer
+  treated as a command argument. Nothing registers a name for it, so it went
+  into the usage line and ate a token off the command line that the injector
+  then discarded -- and a `Greedy` parameter after it was rejected as
+  not-last.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added

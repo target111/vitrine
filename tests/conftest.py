@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from telegram import Chat, Message, PhotoSize, User
+from telegram import Chat, Message, PhotoSize, Update, User
 from telegram import Document as TgDocument
 
 from vitrine.dispatch import Dispatch
@@ -105,6 +105,10 @@ class FakeBot:
         self._hit("set_my_commands", {"args": args, **kwargs})
         return True
 
+    async def delete_my_commands(self, **kwargs: Any) -> bool:
+        self._hit("delete_my_commands", kwargs)
+        return True
+
 
 class FakeQuery:
     def __init__(self, data: str | None = None, message: Message | None = None) -> None:
@@ -148,6 +152,17 @@ def make_update(
         effective_message=message,
         callback_query=query,
     )
+
+
+def make_ptb_update(*, text: str | None = None, edited: bool = False) -> Update:
+    """A real ``telegram.Update``, unlike :func:`make_update`.
+
+    Needed by the tests that run PTB's own filters, which read the update's
+    typed fields rather than ``effective_message``.
+    """
+    field = "edited_message" if edited else "message"
+
+    return Update(update_id=next(_ids), **{field: make_message(text=text)})
 
 
 def make_context(bot: FakeBot | None = None) -> SimpleNamespace:

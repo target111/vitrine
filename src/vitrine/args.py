@@ -1,7 +1,8 @@
 """Declarative command-argument parsing.
 
-Any handler parameter that isn't framework-supplied or provider-registered is
-treated as a command argument, converted by its annotation::
+Any handler parameter that isn't framework-supplied, provider-registered or
+explicitly injected with ``Depends`` is treated as a command argument,
+converted by its annotation::
 
     @router.command("pay")
     async def pay(user, amount: float, note: Greedy = ""):
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, get_args, get_origin
 
 from .exceptions import ConfigurationError, UsageError
+from .injection import Depends
 
 
 class Greedy(str):
@@ -114,6 +116,12 @@ def build_arg_specs(fn: Callable[..., Any], skip: Set[str]) -> list[ArgSpec]:
             param.VAR_POSITIONAL,
             param.VAR_KEYWORD,
         ):
+            continue
+        if isinstance(param.default, Depends):
+            # Injected explicitly, so nothing registers a name for it and
+            # `skip` cannot carry it. Left in, it would take a place in the
+            # usage line and eat a token off the command line that the
+            # injector then discards.
             continue
         annotation = _resolve_annotation(fn, param) if deferred else param.annotation
         greedy = annotation is Greedy

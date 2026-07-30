@@ -6,7 +6,14 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
-from conftest import FakeBot, FakeQuery, make_context, make_dispatch, make_update
+from conftest import (
+    FakeBot,
+    FakeQuery,
+    make_context,
+    make_dispatch,
+    make_ptb_update,
+    make_update,
+)
 from telegram.ext import CommandHandler, ConversationHandler, MessageHandler
 
 from vitrine.callbacks import CallbackData
@@ -275,6 +282,49 @@ def test_a_blank_docstring_leaves_the_description_empty():
     async def got_item(state, update): ...
 
     assert conv.command_registrations()[0].description == ""
+
+
+def test_conversation_steps_ignore_edited_messages(fake_bot: FakeBot):
+    """An edit arrives as a new update, so it would enter the conversation
+    again -- or be fed to whatever state is live now, several steps on from
+    the one that first read it."""
+    conv, _ = build_conv()
+    handler = conv.build(make_dispatch(fake_bot), [])
+    entry = handler.entry_points[0]
+    step = handler.states["item"][0]
+
+    assert entry.filters.check_update(make_ptb_update(text="/order"))
+    assert not entry.filters.check_update(make_ptb_update(text="/order", edited=True))
+    assert step.filters.check_update(make_ptb_update(text="a chair"))
+    assert not step.filters.check_update(make_ptb_update(text="a chair", edited=True))
+
+
+def test_a_step_can_opt_into_edited_messages(fake_bot: FakeBot):
+    conv = Conversation("t_edits", OrderState)
+
+    @conv.entry(command="order")
+    async def start(state, update): ...
+
+    @conv.state("item", edits=True)
+    async def got_item(state, update): ...
+
+    handler = conv.build(make_dispatch(fake_bot), [])
+
+    assert handler.states["item"][0].filters.check_update(
+        make_ptb_update(text="a chair", edited=True)
+    )
+
+
+def test_a_command_name_telegram_would_reject_fails_at_registration():
+    conv = Conversation("t_bad_name", OrderState)
+
+    with pytest.raises(ConfigurationError, match="Order"):
+
+        @conv.entry(command="Order")
+        async def start(state, update): ...
+
+    with pytest.raises(ConfigurationError, match="give up"):
+        conv.cancel("give up")
 
 
 def test_in_run_commands_are_not_discoverable():

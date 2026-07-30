@@ -35,9 +35,6 @@ from telegram.ext import (
     MessageHandler,
     TypeHandler,
 )
-from telegram.ext import (
-    filters as ptb_filters,
-)
 
 from . import commands as command_discovery
 from .auth import Auth
@@ -50,7 +47,12 @@ from .injection import Providers
 from .media import FileIdCache, InMemoryFileIdCache
 from .middleware import Middleware
 from .ratelimit import RateLimiter
-from .routing import Registration, Router
+from .routing import (
+    DEFAULT_MESSAGE_FILTERS,
+    Registration,
+    Router,
+    update_filters,
+)
 from .screens import DELIVERY_KEY, NOOP, Delivery
 from .workers import WorkerSpec, WorkerSupervisor
 
@@ -75,6 +77,7 @@ class Bot(Generic[P]):
         help_command: bool = True,
         file_ids: FileIdCache | None = None,
         scope_chats: dict[str, ScopeChats] | None = None,
+        known_scope_chats: ScopeChats | None = None,
         scope_member: Callable[[str, P | None], bool] | None = None,
         context_type: type[CallbackContext] | None = None,
     ) -> None:
@@ -83,6 +86,12 @@ class Bot(Generic[P]):
         self.markdown_version = markdown_version
         self._help_command = help_command
         self._scope_chats = scope_chats or {}
+        #: Chats that may still carry a chat-scoped command menu written by an
+        #: earlier *run* -- typically every chat a scope has ever resolved to.
+        #: A restart forgets what it published, so without this an admin
+        #: demoted while the bot was down keeps their old menu; clearing a chat
+        #: that has no menu is a no-op, so a generous set is safe.
+        self._known_scope_chats = known_scope_chats
         self._scope_member = scope_member
         self._context_type = context_type or VitrineContext
 
@@ -101,6 +110,7 @@ class Bot(Generic[P]):
         self._dispatch: Dispatch | None = None
         self._supervisor: WorkerSupervisor | None = None
         self._registrations: list[Registration] = []
+        self._published_scope_chats: set[int] = set()
 
     # -- registration (delegates to the root router) ---------------------------
 
@@ -258,6 +268,7 @@ class Bot(Generic[P]):
             handler_regs.append(self._help_registration())
 
         self._registrations = [*handler_regs, *conv_regs]
+        self._check_command_scopes()
 
         wired: list[tuple[Any, int]] = []
         for reg in handler_regs:
@@ -265,15 +276,20 @@ class Bot(Generic[P]):
             callback = dispatch.ptb_callback(reg)
             if reg.kind == "command":
                 assert reg.command is not None
-                handler: Any = CommandHandler(reg.command, callback)
+                handler: Any = CommandHandler(
+                    reg.command, callback, filters=update_filters(None, edits=reg.edits)
+                )
             elif reg.kind == "callback":
                 assert reg.cb_model is not None
                 handler = CallbackQueryHandler(callback, pattern=_callback_pattern(reg))
             else:
                 handler = MessageHandler(
-                    reg.filters
-                    if reg.filters is not None
-                    else ptb_filters.TEXT & ~ptb_filters.COMMAND,
+                    update_filters(
+                        reg.filters
+                        if reg.filters is not None
+                        else DEFAULT_MESSAGE_FILTERS,
+                        edits=reg.edits,
+                    ),
                     callback,
                 )
             wired.append((handler, reg.group))
@@ -294,6 +310,34 @@ class Bot(Generic[P]):
         ))
 
         return wired
+
+    def _check_command_scopes(self) -> None:
+        """A command in a scope with no chats reaches nobody's command menu.
+
+        ``sync_command_menus`` publishes the scopes ``scope_chats`` names, so a
+        scope only a registration mentions -- ``scope="admins"`` against
+        ``scope_chats={"admin": ...}`` -- is silently missing from every menu
+        while still showing up in ``/help``. Only worth checking once
+        ``scope_chats`` is configured at all: an empty one says the app groups
+        ``/help`` by scope (see ``scope_member``) and wants no menus for it.
+        """
+        if not self._scope_chats:
+            return
+
+        known = {"default", *self._scope_chats}
+        unknown = sorted(
+            {
+                reg.scope
+                for reg in self._registrations
+                if reg.kind == "command" and not reg.hidden and reg.scope not in known
+            }
+        )
+        if unknown:
+            raise ConfigurationError(
+                f"command scope(s) {unknown} have no chats, so nothing publishes "
+                f"their menu. Add them to Bot(scope_chats=...), which currently "
+                f"knows {sorted(self._scope_chats)}, or correct the scope name."
+            )
 
     # -- auto /help ---------------------------------------------------------------
 
@@ -372,9 +416,7 @@ class Bot(Generic[P]):
         self._supervisor.start()
 
         try:
-            await command_discovery.sync_command_menus(
-                application.bot, self._registrations, await self._resolve_scope_chats()
-            )
+            await self.sync_commands()
         except Exception:
             logger.exception("could not sync command menus")
 
@@ -396,18 +438,31 @@ class Bot(Generic[P]):
         finally:
             await inv.aclose()
 
-    async def _resolve_scope_chats(self) -> dict[str, Sequence[int]]:
-        resolved: dict[str, Sequence[int]] = {}
-        for scope, chats in self._scope_chats.items():
-            if callable(chats):
-                value = chats()
-                if inspect.isawaitable(value):
-                    value = await value
-                resolved[scope] = list(value)
-            else:
-                resolved[scope] = list(chats)
+    async def sync_commands(self) -> None:
+        """Republish the Telegram command menus: default scope + per-scope chats.
 
-        return resolved
+        Runs at startup. Call it again whenever the membership of a scope
+        changes -- an admin promoted, a chat banned -- and that caller's menu
+        follows without a restart, including losing a menu they no longer
+        qualify for.
+        """
+        application = self.build()
+        known = set(self._published_scope_chats)
+        if self._known_scope_chats is not None:
+            known |= set(await _resolve_chats(self._known_scope_chats))
+
+        self._published_scope_chats = await command_discovery.sync_command_menus(
+            application.bot,
+            self._registrations,
+            await self._resolve_scope_chats(),
+            published_chats=known,
+        )
+
+    async def _resolve_scope_chats(self) -> dict[str, Sequence[int]]:
+        return {
+            scope: await _resolve_chats(chats)
+            for scope, chats in self._scope_chats.items()
+        }
 
     async def _on_ptb_error(self, update: Any, context: Any) -> None:
         """Dispatcher-level catch-all for errors outside the pipeline."""
@@ -425,6 +480,15 @@ class Bot(Generic[P]):
         """Build and run with long polling. For webhooks, use ``build()`` and PTB directly."""  # noqa
         application = self.build()
         application.run_polling(allowed_updates=allowed_updates)
+
+
+async def _resolve_chats(chats: ScopeChats) -> list[int]:
+    """A chat list literal, or whatever its (possibly async) callable returns."""
+    value = chats() if callable(chats) else chats
+    if inspect.isawaitable(value):
+        value = await value
+
+    return list(value)
 
 
 async def _answer_noop(update: Any, context: Any) -> None:

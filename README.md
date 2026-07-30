@@ -138,7 +138,7 @@ Workers get DI, start after init, and shut down gracefully. Crashes restart auto
 | Typed callbacks | `callbacks` | Pydantic models with a prefix. Stale/corrupt data returns "button expired" instead of crashing. Keyed encoding (`keyed=True`) uses query strings and tolerates schema changes; `unpack()` auto-detects either format so live buttons survive upgrades. |
 | Reply keyboards | `screens` | `ReplyKeyboard` value object (persistent + resized by default), `@bot.reply_button("label")` routes presses through the full pipeline, `ReplyButton(style=...)` takes the same styles as an inline `Button`, `REMOVE_REPLY_KEYBOARD` clears it. |
 | Markdown builder | `markdown` | Composable/nestable nodes, safe escaping for V1+V2, `raw()` escape hatch. |
-| Routers | `routing` | `@router.command/callback/message`, sub-routers, `router.raw()` for plain PTB handlers. |
+| Routers | `routing` | `@router.command/callback/message`, sub-routers, `router.raw()` for plain PTB handlers. Handlers ignore edited messages unless they pass `edits=True`. |
 | Command args | `args` | Typed params from the signature; required/optional/`Greedy`; auto usage messages. |
 | Pagination | `pagination` | Implement `count()`/`fetch(offset, limit)`, use `Paginator` and `nav_row()` buttons. |
 | Conversations | `conversations` | Dataclass state per run, string transitions, timeout, `on_exit(reason)` hooks. Entry commands land in `/help`; `ANY_STATE` mounts one step on every state; `command="skip"` is valid only inside its state; `exclusive=True` ends the caller's other runs. Full DI/middleware/principal interop. |
@@ -146,7 +146,7 @@ Workers get DI, start after init, and shut down gracefully. Crashes restart auto
 | Rate limiting | `ratelimit` | `@throttle(3, per=60)`, custom keys and custom behavior on limits. |
 | Logging | `logging` | Key=value format, one line per update, `audit()` convention. |
 | Errors | `errors` | `@bot.on_error(Type)` registry dispatched by MRO. Handlers can return a `Screen` to render into the current message. |
-| Command discovery | `commands` | Auto `/help` filtered by caller's scopes. `set_my_commands()` per scope. `hidden=True` for internal handlers. |
+| Command discovery | `commands` | Auto `/help` filtered by caller's scopes. `set_my_commands()` per scope, with the menus of chats that have left a scope deleted rather than left stale; `bot.sync_commands()` republishes without a restart. `hidden=True` for internal handlers. |
 | Middleware | `middleware` | `async def mw(event, call_next)` at bot or router scope. `event.extras` values become injectable. |
 
 ## Example: scaled mode
@@ -161,4 +161,4 @@ Not a fork or parallel dispatcher. `bot.build()` returns the PTB `Application` f
 
 ## Testing
 
-Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 127 tests that exercise dispatch and conversations the same way you can.
+Views are pure functions -- test them without a live bot. `Screen.content()`/`markup()` show what would be sent. `Delivery` accepts any object with `send`/`edit` methods (see `tests/conftest.py` for a mock). This repo has 139 tests that exercise dispatch and conversations the same way you can.

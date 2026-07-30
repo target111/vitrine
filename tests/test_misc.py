@@ -9,7 +9,7 @@ from conftest import FakeMessage, make_update
 from vitrine.args import ArgSpec, Greedy, build_arg_specs, parse_args, usage_string
 from vitrine.errors import ErrorRegistry
 from vitrine.exceptions import ConfigurationError, UsageError
-from vitrine.injection import Invocation, Providers
+from vitrine.injection import Depends, Invocation, Providers
 from vitrine.markdown import Md, bold, code, escape, italic, link, raw
 from vitrine.pagination import ListSource, Paginator, nav_row
 from vitrine.ratelimit import _SWEEP_EVERY, RateLimiter
@@ -121,6 +121,21 @@ def test_an_argument_type_must_be_importable_at_runtime():
         build_arg_specs(
             deferred_annotations.unresolvable_argument, skip={"update"}
         )
+
+
+def test_a_depends_parameter_is_not_a_command_argument():
+    """An explicit `Depends` default is injected, but no name registers it, so
+    `skip` cannot carry it and it used to be parsed off the command line."""
+
+    def grant(update, tg_id: int, service=Depends(Providers)):
+        pass
+
+    specs = build_arg_specs(grant, skip={"update"})
+
+    assert [s.name for s in specs] == ["tg_id"]
+    assert usage_string("grant", specs) == "/grant <tg_id>"
+    with pytest.raises(UsageError, match="too many"):
+        parse_args("grant", specs, "7 sneaks-into-service")
 
 
 def test_bool_conversion():

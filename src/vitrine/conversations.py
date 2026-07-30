@@ -70,9 +70,6 @@ from telegram.ext import (
     MessageHandler,
     TypeHandler,
 )
-from telegram.ext import (
-    filters as ptb_filters,
-)
 from telegram.warnings import PTBUserWarning
 
 from .callbacks import CallbackData
@@ -80,7 +77,13 @@ from .dispatch import Dispatch
 from .exceptions import ConfigurationError
 from .injection import resolve_kwargs, unresolvable_params
 from .middleware import Middleware
-from .routing import Registration, first_doc_line
+from .routing import (
+    DEFAULT_MESSAGE_FILTERS,
+    Registration,
+    first_doc_line,
+    update_filters,
+    validate_command_name,
+)
 from .screens import Screen
 
 #: sentinel a handler returns to finish the conversation
@@ -121,6 +124,7 @@ class _Step:
         description: str = "",
         scope: str = "default",
         hidden: bool = False,
+        edits: bool = False,
     ) -> None:
         self.fn = fn
         self.states = states
@@ -132,6 +136,7 @@ class _Step:
         self.description = description
         self.scope = scope
         self.hidden = hidden
+        self.edits = edits
 
     @property
     def is_entry(self) -> bool:
@@ -174,17 +179,21 @@ class Conversation:
         description: str | None = None,
         scope: str = "default",
         hidden: bool = False,
+        edits: bool = False,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """An entry point: a command, a typed callback button, or a message filter.
 
         A command entry carries the same menu metadata as ``@router.command``:
         it is listed in ``/help`` and published to the Telegram command menu of
-        its ``scope`` unless ``hidden``.
+        its ``scope`` unless ``hidden``. ``edits=True`` lets an edit of an older
+        message start the conversation, which by default it cannot.
         """
         if command is None and callback is None and filters is None:
             raise ConfigurationError(
                 "conversation entry needs a command, callback, or filters"
             )
+        if command is not None:
+            validate_command_name(command, f"conversation {self.name!r}")
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             desc = first_doc_line(fn) if description is None else description
@@ -199,6 +208,7 @@ class Conversation:
                     description=desc,
                     scope=scope,
                     hidden=hidden,
+                    edits=edits,
                 )
             )
             return fn
@@ -212,6 +222,7 @@ class Conversation:
         callback: type[CallbackData] | None = None,
         when: Callable[[Any], bool] | None = None,
         filters: Any = None,
+        edits: bool = False,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """A handler for one or more named states (text message by default).
 
@@ -219,9 +230,13 @@ class Conversation:
         the same handler on each, which is what a Cancel button wants.
         ``command="skip"`` makes the step a ``/skip`` command instead: valid
         only while the run sits in that state, so it stays out of ``/help``.
+        ``edits=True`` also feeds this step edits of older messages, which by
+        default reach no step: the run has usually moved on since.
         """
         if not names:
             raise ConfigurationError("conversation state needs at least one name")
+        if command is not None:
+            validate_command_name(command, f"conversation {self.name!r}")
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self._steps.append(
@@ -232,6 +247,7 @@ class Conversation:
                     callback=callback,
                     when=when,
                     filters=filters,
+                    edits=edits,
                 )
             )
             return fn
@@ -242,6 +258,7 @@ class Conversation:
         self, command: str = "cancel"
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """A fallback command that cancels the run (exit hook gets CANCELLED)."""
+        validate_command_name(command, f"conversation {self.name!r}")
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self._steps.append(_Step(fn, command=command, is_fallback=True))
@@ -450,16 +467,18 @@ class Conversation:
         self, step: _Step, callback: Callable[..., Coroutine[Any, Any, Any]]
     ) -> Any:
         if step.command is not None:
-            return CommandHandler(step.command, callback)
+            return CommandHandler(
+                step.command, callback, filters=update_filters(None, edits=step.edits)
+            )
 
         if step.callback is not None:
             return CallbackQueryHandler(callback, pattern=step.callback.matches)
 
         message_filters = step.filters
         if message_filters is None:
-            message_filters = ptb_filters.TEXT & ~ptb_filters.COMMAND
+            message_filters = DEFAULT_MESSAGE_FILTERS
 
-        return MessageHandler(message_filters, callback)
+        return MessageHandler(update_filters(message_filters, edits=step.edits), callback)
 
     def _make_callback(
         self,
