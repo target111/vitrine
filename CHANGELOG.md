@@ -4,6 +4,63 @@ Notable changes to vitrine. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-01
+
+The internals were substantially rewritten. Nothing exported from `vitrine`
+changed; the notes below cover the behaviour that did.
+
+### Added
+
+- `args=True` on `@conv.entry`: the entry command takes the same typed
+  arguments `@router.command` does, so a flow can start with what it needs
+  already in hand -- `/order ABC 3`, or a `t.me/bot?start=<payload>` deep
+  link. Bad arguments get the usage line and the run never starts. States
+  and fallbacks keep their parameters injected, as before.
+- `bot.sync_commands(chats=...)` syncs just the named chats and touches
+  nothing else, not even the default menu. The right call after one
+  promotion, and a safe one even while a `scope_chats` resolver is having
+  a bad day.
+
+### Changed
+
+- `sync_commands()` skips chats whose menu already holds what it would
+  write: a full re-sync after one promotion costs one API round-trip, not
+  one per scoped chat.
+- Menu publishing is now a `vitrine.commands.CommandMenus` object holding
+  the process's record of what it has published, replacing the
+  `sync_command_menus()` function and its `published_chats=` argument.
+  `vitrine.routing.doc_summary` and `doc_body` are one `split_docstring`
+  returning both halves, and `validate_command_name` no longer takes an
+  `owner`. Nothing exported from `vitrine` changes.
+
+### Fixed
+
+- A conversation step whose `when=` rejects a button press no longer
+  swallows it: `when` narrows the PTB pattern, as it always has outside
+  conversations, so a sibling step on the same model gets to match. A press
+  every step rejects is answered by a catch-all handler, so the button no
+  longer spins until Telegram gives up on it. The catch-all sits last in
+  group 0, so keep callback handlers there (the default): Telegram takes one
+  answer per press, and an alert from a later group arrives too late to show.
+- A conversation entry that starts no run -- refused arguments, a failed
+  guard, a bare `Screen` -- no longer ends the caller's other exclusive runs
+  or leaves a draft state behind. Peers now end right after the entry's
+  screen renders, so a peer's goodbye follows the new flow's hello. An entry
+  returning `END` started and finished, so it still counts.
+- Naming `"default"` in `Bot(scope_chats=...)` is now a `ConfigurationError`:
+  its chats were getting a menu with every default command twice.
+- A chat named by more than one scope in `Bot(scope_chats=...)` now gets one
+  menu holding all of its scopes' commands. Telegram keeps a single chat
+  menu per chat, so writing one scope at a time left whichever came last --
+  an admin who was also a vip saw the vip menu and no `/ban`.
+- A first `sync_commands()` that fails no longer discards `known_scope_chats`:
+  the seed is consumed by the first sync that *completes*, so a database
+  down at startup -- exactly when the first sync runs -- no longer orphans
+  every historical chat's stale menu for the life of the process.
+- Concurrent `sync_commands()` calls are serialized, so overlapping syncs
+  can no longer drop each other's bookkeeping and then skip a chat that
+  still needed its menu rewritten.
+
 ## [0.3.0] - 2026-07-31
 
 ### Added
@@ -143,6 +200,7 @@ First release on PyPI as `vitrine-tg` (import name: `vitrine`).
   rate limiting, a composable Markdown builder, and structured logging.
 
 [#1]: https://github.com/target111/vitrine/issues/1
+[0.4.0]: https://github.com/target111/vitrine/releases/tag/v0.4.0
 [0.3.0]: https://github.com/target111/vitrine/releases/tag/v0.3.0
 [0.2.0]: https://github.com/target111/vitrine/releases/tag/v0.2.0
 [0.1.0]: https://github.com/target111/vitrine/releases/tag/v0.1.0

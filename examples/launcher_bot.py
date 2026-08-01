@@ -56,9 +56,7 @@ def shop_screen() -> Screen:
         text=Md()
         .heading(SHOP)
         .line(italic("Inline buttons navigate the screen; the launcher stays put.")),
-        keyboard=[
-            [Button(name.title(), callback=ItemCB(name=name)) for name in CATALOG]
-        ],
+        keyboard=[[Button(name.title(), callback=ItemCB(name=name)) for name in CATALOG]],
     )
 
 

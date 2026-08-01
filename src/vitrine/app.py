@@ -18,7 +18,7 @@ app's principal type, and mount everything here. The underlying PTB
 
 from __future__ import annotations
 
-import inspect
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Generic, TypeVar
@@ -29,16 +29,14 @@ from telegram.ext import (
     ApplicationHandlerStop,
     CallbackContext,
     CallbackQueryHandler,
-    CommandHandler,
     ContextTypes,
     ExtBot,
-    MessageHandler,
     TypeHandler,
 )
 
 from . import commands as command_discovery
 from .auth import Auth
-from .callbacks import CallbackDataError
+from .commands import CommandMenus, ScopeChats, resolve_chats
 from .conversations import Conversation
 from .dispatch import Dispatch
 from .errors import ErrorRegistry
@@ -47,15 +45,13 @@ from .injection import Providers
 from .media import FileIdCache, InMemoryFileIdCache
 from .middleware import Middleware
 from .ratelimit import RateLimiter
-from .routing import Registration, Router, command_filters, message_filters
-from .screens import DELIVERY_KEY, NOOP, Delivery
+from .routing import Registration, Router, ptb_handler
+from .screens import DELIVERY_KEY, Delivery
 from .workers import WorkerSpec, WorkerSupervisor
 
 logger = logging.getLogger("vitrine.app")
 
 P = TypeVar("P")
-
-ScopeChats = Callable[[], Any] | Sequence[int]
 
 
 class VitrineContext(CallbackContext[ExtBot, dict, dict, dict]):
@@ -72,28 +68,29 @@ class Bot(Generic[P]):
         help_command: bool = True,
         file_ids: FileIdCache | None = None,
         scope_chats: dict[str, ScopeChats] | None = None,
-        known_scope_chats: ScopeChats | None = None,
         scope_member: Callable[[str, P | None], bool] | None = None,
-        context_type: type[CallbackContext] | None = None,
+        known_scope_chats: ScopeChats | None = None,
         strict_types: bool = False,
+        context_type: type[CallbackContext] | None = None,
     ) -> None:
         self.token = token
         self.auth = auth
         self.markdown_version = markdown_version
         self._help_command = help_command
         self._scope_chats = scope_chats or {}
-        #: Chats that may still carry a chat-scoped command menu written by an
-        #: earlier *run* -- typically every chat a scope has ever resolved to.
-        #: A restart forgets what it published, so without this an admin
-        #: demoted while the bot was down keeps their old menu; clearing a chat
-        #: that has no menu is a no-op, so a generous set is safe. Read once,
-        #: by the first ``sync_commands()`` -- see ``_seeded_known_chats``.
-        self._known_scope_chats: ScopeChats = known_scope_chats or ()
+        if "default" in self._scope_chats:
+            # Every scoped chat's menu already starts from the default
+            # commands; naming "default" here would list each of them twice.
+            raise ConfigurationError(
+                'scope_chats must not name "default": the default commands are '
+                "already part of every scoped chat's menu"
+            )
         self._scope_member = scope_member
-        self._context_type = context_type or VitrineContext
-        #: fail the build, rather than log, when a handler's annotation and its
-        #: provider provably disagree -- see ``Dispatch._check_types``
         self._strict_types = strict_types
+        #: chats that may carry a menu from an earlier run -- a recovery seed,
+        #: not steady state. See CommandMenus for when it is consumed.
+        self._menus = CommandMenus(known_scope_chats)
+        self._context_type = context_type or VitrineContext
 
         self.router = Router("root")
         self.providers = Providers()
@@ -110,8 +107,6 @@ class Bot(Generic[P]):
         self._dispatch: Dispatch | None = None
         self._supervisor: WorkerSupervisor | None = None
         self._registrations: list[Registration] = []
-        self._published_scope_chats: set[int] = set()
-        self._seeded_known_chats = False
 
     # -- registration (delegates to the root router) ---------------------------
 
@@ -214,8 +209,7 @@ class Bot(Generic[P]):
             raise ConfigurationError("Bot needs a token to build the PTB application")
 
         application = (
-            Application
-            .builder()
+            Application.builder()
             .token(self.token)
             .context_types(ContextTypes(context=self._context_type))
             .post_init(self._post_init)
@@ -246,7 +240,7 @@ class Bot(Generic[P]):
                 self.limiter,
                 self.auth,
                 self._middlewares,
-                self._strict_types,
+                strict_types=self._strict_types,
             )
 
         return self._dispatch
@@ -274,25 +268,12 @@ class Bot(Generic[P]):
             handler_regs.append(self._help_registration())
 
         self._registrations = [*handler_regs, *conv_regs]
-        self._check_command_scopes()
+        self._check_scopes(self._registrations)
 
         wired: list[tuple[Any, int]] = []
         for reg in handler_regs:
             dispatch.validate(reg)
-            callback = dispatch.ptb_callback(reg)
-            if reg.kind == "command":
-                assert reg.command is not None
-                handler: Any = CommandHandler(
-                    reg.command, callback, filters=command_filters(edits=reg.edits)
-                )
-            elif reg.kind == "callback":
-                assert reg.cb_model is not None
-                handler = CallbackQueryHandler(callback, pattern=_callback_pattern(reg))
-            else:
-                handler = MessageHandler(
-                    message_filters(reg.filters, edits=reg.edits), callback
-                )
-            wired.append((handler, reg.group))
+            wired.append((ptb_handler(reg, dispatch.ptb_callback(reg)), reg.group))
 
         for conv, middlewares in self.router.walk_conversations():
             wired.append((conv.build(dispatch, middlewares), 0))
@@ -304,35 +285,38 @@ class Bot(Generic[P]):
             conv.link_peers(exclusive)
         for handler, group in self.router.walk_raw():
             wired.append((handler, group))
-        wired.append((
-            CallbackQueryHandler(_answer_noop, pattern=lambda d: d == NOOP),
-            0,
-        ))
+        # Catch-all: a press no handler took -- a NOOP button, or one every
+        # when= on its model rejected -- still gets answered, so Telegram
+        # doesn't spin the button until timeout. It sits *last in the default
+        # group*: Telegram accepts one answer per press and PTB runs groups
+        # independently, so a callback handler in a later group still runs but
+        # its alert arrives too late to display. Callback handlers belong in
+        # the default group.
+        wired.append((CallbackQueryHandler(_answer_stray), 0))
 
         return wired
 
-    def _check_command_scopes(self) -> None:
-        """A command in a scope with no chats reaches nobody's command menu.
+    def _check_scopes(self, registrations: Sequence[Registration]) -> None:
+        """A command scope no chat resolver knows is almost always a typo.
 
-        ``sync_command_menus`` publishes the scopes ``scope_chats`` names, so a
-        scope only a registration mentions -- ``scope="admins"`` against
-        ``scope_chats={"admin": ...}`` -- is silently missing from every menu
-        while still showing up in ``/help``. Only worth checking once
-        ``scope_chats`` is configured at all: an empty one says the app groups
-        ``/help`` by scope (see ``scope_member``) and wants no menus for it.
+        ``scope="admins"`` against ``scope_chats={"admin": ...}`` reaches
+        ``/help`` and nobody's Telegram menu. Only checked when ``scope_chats``
+        is configured at all -- without it, ``scope`` is just a /help grouping.
         """
         if not self._scope_chats:
             return
 
-        unknown = command_discovery.unpublished_scopes(
-            self._registrations, self._scope_chats
-        )
-        if unknown:
-            raise ConfigurationError(
-                f"command scope(s) {unknown} have no chats, so nothing publishes "
-                f"their menu. Add them to Bot(scope_chats=...), which currently "
-                f"knows {sorted(self._scope_chats)}, or correct the scope name."
-            )
+        # The same filter the menus themselves apply, so a registration this
+        # check clears is exactly one a menu would carry.
+        for reg in command_discovery.menu_commands(registrations):
+            if reg.scope == "default":
+                continue
+            if reg.scope not in self._scope_chats:
+                raise ConfigurationError(
+                    f"command /{reg.command} has scope {reg.scope!r}, but "
+                    f"scope_chats only knows {sorted(self._scope_chats)}: no "
+                    f"chat would ever receive it in a menu"
+                )
 
     # -- auto /help ---------------------------------------------------------------
 
@@ -340,28 +324,28 @@ class Bot(Generic[P]):
         async def help_command(update: Any, context: Any, command: str = "") -> Any:
             """Show available commands.
 
-            Name one of them, as in /help pay, to see that command in full
-            instead: how to call it, what each argument takes, and what you
-            need in order to run it.
+            Name one command to see it in full: usage, arguments, and what
+            governs it (scope, guards, rate limit).
             """
             scopes = await self._visible_scopes(update, context)
-            if not command:
+            if not command.strip():
                 return command_discovery.help_screen(self._registrations, scopes)
 
-            reg = command_discovery.find_command(self._registrations, command, scopes)
+            reg = command_discovery.resolve_command(self._registrations, scopes, command)
             if reg is None:
+                # Invisible answers exactly like nonexistent: /help ban must
+                # not confirm to a non-admin that /ban is a thing.
                 return command_discovery.unknown_command_screen(command)
 
-            specs = self._make_dispatch().arg_specs(reg) if reg.parses_args else []
-
-            return command_discovery.command_help_screen(reg, specs)
+            specs = self._make_dispatch().arg_specs(reg)
+            return command_discovery.command_detail_screen(reg, specs)
 
         return Registration(
             kind="command",
             fn=help_command,
             name="help",
             command="help",
-            description="Show commands, or one command in full",
+            description="Show available commands",
         )
 
     async def _visible_scopes(self, update: Any, context: Any) -> set[str]:
@@ -426,6 +410,9 @@ class Bot(Generic[P]):
         self._supervisor.start()
 
         try:
+            # The same path a later bot.sync_commands() takes, not a parallel
+            # one -- and a failure (database still coming up, say) must not
+            # break startup: the CommandMenus seed survives for the next sync.
             await self.sync_commands()
         except Exception:
             logger.exception("could not sync command menus")
@@ -448,42 +435,36 @@ class Bot(Generic[P]):
         finally:
             await inv.aclose()
 
-    async def sync_commands(self) -> None:
-        """Republish the Telegram command menus: default scope + per-scope chats.
+    async def sync_commands(self, chats: Sequence[int] | None = None) -> None:
+        """Republish Telegram command menus so membership changes take effect.
 
-        Runs at startup. Call it again whenever the membership of a scope
-        changes -- an admin promoted, a chat banned -- and that caller's menu
-        follows without a restart, including losing a menu they no longer
-        qualify for.
-
-        Builds first for ``self._registrations``, not for the ``Application``:
-        the menus are published from the registrations, and only ``build()``
-        fills them in. On an already-running bot that call is a no-op.
+        Call after promoting or demoting someone instead of restarting; pass
+        ``chats=[...]`` after a single membership change to touch only those
+        chats (nothing else written, nothing else cleared, not even the
+        default menu). Startup runs the very same path.
         """
-        application = self.build()
-        known = set(self._published_scope_chats)
-        if not self._seeded_known_chats:
-            # Only the first sync of a process has forgotten state to recover.
-            # After it, `_published_scope_chats` carries forward exactly what we
-            # wrote, and a chat cleared once must not be cleared again on every
-            # later call -- that is one API round-trip per historical chat, per
-            # call, plus a re-run of a `known_scope_chats` callable that is
-            # typically a database query.
-            known |= set(await _resolve_chats(self._known_scope_chats))
-            self._seeded_known_chats = True
+        if self.application is None:
+            raise ConfigurationError(
+                "sync_commands() needs the PTB application; call build() first"
+            )
 
-        self._published_scope_chats = await command_discovery.sync_command_menus(
-            application.bot,
+        await self._menus.sync(
+            self.application.bot,
             self._registrations,
-            await self._resolve_scope_chats(),
-            published_chats=known,
+            self._resolve_scope_chats,
+            chats=chats,
         )
 
     async def _resolve_scope_chats(self) -> dict[str, Sequence[int]]:
-        return {
-            scope: await _resolve_chats(chats)
-            for scope, chats in self._scope_chats.items()
-        }
+        # Handed to CommandMenus.sync unevaluated: it reads the scopes under
+        # the same lock it writes them, so an older read cannot land last.
+        # Resolvers are independent and typically each hit a database, so the
+        # startup cost is the slowest one rather than the sum.
+        resolved = await asyncio.gather(
+            *(resolve_chats(chats) for chats in self._scope_chats.values())
+        )
+
+        return dict(zip(self._scope_chats, resolved, strict=True))
 
     async def _on_ptb_error(self, update: Any, context: Any) -> None:
         """Dispatcher-level catch-all for errors outside the pipeline."""
@@ -503,41 +484,11 @@ class Bot(Generic[P]):
         application.run_polling(allowed_updates=allowed_updates)
 
 
-async def _resolve_chats(chats: ScopeChats) -> list[int]:
-    """A chat list literal, or whatever its (possibly async) callable returns."""
-    value = chats() if callable(chats) else chats
-    if inspect.isawaitable(value):
-        value = await value
-
-    return list(value)
-
-
-async def _answer_noop(update: Any, context: Any) -> None:
+async def _answer_stray(update: Any, context: Any) -> None:
+    """Answer a press nothing claimed, so the button doesn't spin to timeout."""
     query = update.callback_query
     if query is not None:
         try:
             await query.answer()
         except Exception:  # noqa: BLE001
             pass
-
-
-def _callback_pattern(reg: Registration) -> Callable[[object], bool]:
-    """Raw-string predicate for PTB; a failed decode still matches so the
-    handler can answer with a friendly 'button expired' instead of a dead button."""
-    model = reg.cb_model
-    when = reg.cb_when
-    assert model is not None
-
-    def pattern(data: object) -> bool:
-        if not model.matches(data):
-            return False
-        if when is None:
-            return True
-        try:
-            decoded = model.unpack(data)  # type: ignore[arg-type]
-        except CallbackDataError:
-            return True
-
-        return bool(when(decoded))
-
-    return pattern

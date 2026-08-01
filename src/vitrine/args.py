@@ -1,8 +1,7 @@
 """Declarative command-argument parsing.
 
-Any handler parameter that isn't framework-supplied, provider-registered or
-explicitly injected with ``Depends`` is treated as a command argument,
-converted by its annotation::
+Any handler parameter that isn't framework-supplied or provider-registered is
+treated as a command argument, converted by its annotation::
 
     @router.command("pay")
     async def pay(user, amount: float, note: Greedy = ""):
@@ -33,28 +32,19 @@ class Greedy(str):
 _TRUE = {"1", "true", "yes", "y", "on"}
 _FALSE = {"0", "false", "no", "n", "off"}
 
-_TYPE_LABELS: dict[Any, str] = {
-    int: "integer",
-    float: "number",
-    bool: "yes/no",
-    str: "text",
-    Greedy: "text",
-}
+_TYPE_LABELS: dict[Any, str] = {int: "integer", float: "number", bool: "yes/no"}
 
 
 def type_label(annotation: Any) -> str:
-    """What an argument's type is called when talking to a user.
+    """What to call an argument's type when talking to the user.
 
-    Used by conversion errors and by ``/help <command>``, so the two agree on
-    what the user was supposed to send.
+    One table, so the usage hint a bad argument raises and the ``/help`` line
+    describing that same argument cannot end up calling it two things.
     """
-    if annotation is inspect.Parameter.empty or annotation is Any:
+    if annotation in (inspect.Parameter.empty, str, Greedy, Any):
         return "text"
 
-    try:
-        return _TYPE_LABELS[annotation]
-    except (KeyError, TypeError):  # unhashable annotations exist
-        return str(getattr(annotation, "__name__", annotation))
+    return _TYPE_LABELS.get(annotation) or getattr(annotation, "__name__", str(annotation))
 
 
 def _convert(raw: str, annotation: Any, name: str) -> Any:
@@ -67,7 +57,7 @@ def _convert(raw: str, annotation: Any, name: str) -> Any:
             return True
         if lowered in _FALSE:
             return False
-        raise UsageError("", hint=f"{name} must be yes/no")
+        raise UsageError("", hint=f"{name} must be {type_label(bool)}")
 
     if get_origin(annotation) is not None:  # Optional[int] etc: try each arg
         for candidate in get_args(annotation):
@@ -82,8 +72,9 @@ def _convert(raw: str, annotation: Any, name: str) -> Any:
     try:
         return annotation(raw)
     except (ValueError, TypeError) as exc:
-        kind = type_label(annotation)
-        raise UsageError("", hint=f"{name} must be a valid {kind} (got {raw!r})") from exc
+        raise UsageError(
+            "", hint=f"{name} must be a valid {type_label(annotation)} (got {raw!r})"
+        ) from exc
 
 
 def _resolve_annotation(fn: Callable[..., Any], param: inspect.Parameter) -> Any:
@@ -112,17 +103,9 @@ class ArgSpec:
     greedy: bool
     default: Any = None
 
-    @property
-    def label(self) -> str:
-        """The argument's name as the usage line spells it, trailing dots and all.
-
-        Shared with ``/help <command>``'s argument list so the heading and the
-        bullets below it cannot disagree about how a greedy argument is named.
-        """
-        return f"{self.name}..." if self.greedy else self.name
-
     def placeholder(self) -> str:
-        return f"<{self.label}>" if self.required else f"[{self.label}]"
+        inner = f"{self.name}..." if self.greedy else self.name
+        return f"<{inner}>" if self.required else f"[{inner}]"
 
 
 def build_arg_specs(fn: Callable[..., Any], skip: Set[str]) -> list[ArgSpec]:
@@ -147,11 +130,11 @@ def build_arg_specs(fn: Callable[..., Any], skip: Set[str]) -> list[ArgSpec]:
             param.VAR_KEYWORD,
         ):
             continue
+        # An explicit Depends(...) default is injection, not an argument: the
+        # injector supplies it, so it must not appear in the usage line or eat
+        # a token off the command line -- and a Greedy parameter after it is
+        # still last among the *arguments*.
         if isinstance(param.default, Depends):
-            # Injected explicitly, so nothing registers a name for it and
-            # `skip` cannot carry it. Left in, it would take a place in the
-            # usage line and eat a token off the command line that the
-            # injector then discards.
             continue
         annotation = _resolve_annotation(fn, param) if deferred else param.annotation
         greedy = annotation is Greedy

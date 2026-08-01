@@ -31,6 +31,11 @@ def build_bot() -> Bot:
         token=os.environ.get("BOT_TOKEN", ""),
         auth=make_auth(),
         scope_chats={"admin": lambda: ADMIN_IDS},
+        # Chats a *previous* run may have published a menu to: an admin
+        # removed from ADMIN_IDS while the bot was down gets their menu
+        # cleared by the first sync. In a real app this would come from
+        # storage ("every chat any scope has ever resolved to").
+        known_scope_chats=ADMIN_IDS,
     )
 
     # Services: constructed here, injected everywhere by parameter name.

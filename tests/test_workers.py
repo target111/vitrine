@@ -25,9 +25,7 @@ async def test_periodic_success_resets_backoff(monkeypatch):
         if script and script.pop(0) == "fail":
             raise RuntimeError("boom")
 
-    supervisor = WorkerSupervisor(
-        Providers(), lambda name: Invocation(handler_name=name)
-    )
+    supervisor = WorkerSupervisor(Providers(), lambda name: Invocation(handler_name=name))
     task = asyncio.create_task(
         supervisor._supervise(WorkerSpec(fn=flaky, name="flaky", every=0.0))
     )

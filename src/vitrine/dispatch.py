@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Coroutine, Set
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from telegram.error import TelegramError
@@ -25,8 +25,8 @@ from .injection import (
     RESERVED_NAMES,
     Invocation,
     Providers,
+    annotation_conflicts,
     resolve_kwargs,
-    type_mismatches,
     unresolvable_params,
 )
 from .logging import log_event
@@ -60,6 +60,7 @@ class Dispatch:
         limiter: RateLimiter,
         auth: Auth | None = None,
         middlewares: list[Middleware] | None = None,
+        *,
         strict_types: bool = False,
     ) -> None:
         self.providers = providers
@@ -86,7 +87,16 @@ class Dispatch:
         )
 
     def arg_specs(self, reg: Registration) -> list[ArgSpec]:
-        """Compute (once) which params of a command handler are typed arguments."""
+        """Compute (once) which params of a command handler are typed arguments.
+
+        Empty unless this registration actually parses a command line: the two
+        halves of that rule (the transport is a command, and ``args`` opted in)
+        live here, not at each call site -- ``args`` defaults to True, so a
+        caller that checked only one half would get specs for a message step.
+        """
+        if reg.kind != "command" or not reg.args:
+            return []
+
         cached = self._arg_specs.get(id(reg.fn))
         if cached is None:
             skip = RESERVED_NAMES | self.providers.names()
@@ -98,10 +108,16 @@ class Dispatch:
         return cached
 
     def validate(self, reg: Registration) -> None:
-        """Build-time check: every handler param must have a source."""
+        """Build-time check: every handler param must have a source.
+
+        Also reports annotations that *provably* disagree with what their
+        provider hands over -- a warning on the ``vitrine.build`` logger, or a
+        build failure under ``strict_types`` -- because the alternative is an
+        ``AttributeError`` deep inside a handler that names neither the
+        parameter nor the provider.
+        """
         extra = {self.auth.name} if self.auth else set()
-        if reg.kind == "command":
-            extra = extra | {spec.name for spec in self.arg_specs(reg)}
+        extra = extra | {spec.name for spec in self.arg_specs(reg)}
 
         bad = unresolvable_params(reg.fn, self.providers, extra_names=extra)
         if bad:
@@ -110,31 +126,11 @@ class Dispatch:
                 f"supply: not reserved, not a provider, not a command argument"
             )
 
-        self._check_types(reg, extra_names=extra)
-
-    def _check_types(self, reg: Registration, *, extra_names: Set[str]) -> None:
-        """Report annotations the provider demonstrably cannot satisfy.
-
-        A warning by default: injection is by name, and a hand-written stand-in
-        that fails ``issubclass`` is a legitimate thing to inject -- most of a
-        test suite does it. ``Bot(strict_types=True)`` promotes it to a build
-        failure for apps that would rather have the guarantee.
-        """
-        for name, wanted, supplied in type_mismatches(
-            reg.fn, self.providers, extra_names=extra_names
-        ):
-            message = (
-                f"handler {reg.name!r} annotates {name!r} as {wanted.__name__}, but "
-                f"its provider supplies {supplied.__name__}"
-            )
-            if self.strict_types:
-                raise ConfigurationError(message)
-
-            build_logger.warning(
-                "%s. Annotate what the provider returns, or drop the annotation; "
-                "Bot(strict_types=True) makes this an error.",
-                message,
-            )
+        conflicts = annotation_conflicts(reg.fn, self.providers, skip=extra)
+        if conflicts and self.strict_types:
+            raise ConfigurationError("; ".join(conflicts))
+        for finding in conflicts:
+            build_logger.warning("%s", finding)
 
     def ptb_callback(
         self, reg: Registration
@@ -164,9 +160,6 @@ class Dispatch:
                 await self._answer_query(update, EXPIRED_BUTTON_TEXT)
                 return None
 
-            if reg.cb_when is not None and not reg.cb_when(inv.data):
-                return None
-
         event = Event(
             update=update,
             context=context,
@@ -186,13 +179,10 @@ class Dispatch:
             if spec is not None:
                 await self.limiter.enforce(spec, evt)
 
-            if reg.kind == "command":
-                specs = self.arg_specs(reg)
-                if specs:
-                    assert reg.command is not None
-                    inv.extras.update(
-                        parse_args(reg.command, specs, command_arg_text(update))
-                    )
+            specs = self.arg_specs(reg)
+            if specs:
+                assert reg.command is not None
+                inv.extras.update(parse_args(reg.command, specs, command_arg_text(update)))
 
             kwargs = await resolve_kwargs(reg.fn, inv, self.providers)
             result = reg.fn(**kwargs)

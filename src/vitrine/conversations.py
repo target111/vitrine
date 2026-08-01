@@ -50,10 +50,17 @@ command::
 
 An entry command is a real command: it is listed in ``/help`` and published to
 the Telegram command menu, with the same ``description``/``scope``/``hidden``
-metadata as ``@router.command``. It takes no typed arguments, though -- the
-flow asks for what it needs, one state at a time. ``exclusive=True`` makes
-starting this conversation end the caller's other exclusive runs, so a
-half-finished flow can't keep matching messages meant for the new one.
+metadata as ``@router.command`` -- and with ``args=True``, the same typed
+command arguments, so ``/order ABC 3`` (or a ``t.me/bot?start=<payload>`` deep
+link) starts the flow with what it needs already in hand. ``exclusive=True``
+makes starting this conversation end the caller's other exclusive runs, so a
+half-finished flow can't keep matching messages meant for the new one; peers
+end only once a run really starts, and only after the entry's screen renders.
+
+An entry that starts no run leaves no trace: refused arguments, a failed
+guard, a throttle, or a handler returning a bare ``Screen`` neither end the
+caller's other runs nor leave a draft state behind. Returning :data:`END`
+counts as started-and-finished.
 """
 
 from __future__ import annotations
@@ -64,13 +71,7 @@ from enum import Enum
 from typing import Any
 
 from telegram import Update
-from telegram.ext import (
-    CallbackQueryHandler,
-    CommandHandler,
-    ConversationHandler,
-    MessageHandler,
-    TypeHandler,
-)
+from telegram.ext import ConversationHandler, TypeHandler
 from telegram.warnings import PTBUserWarning
 
 from .callbacks import CallbackData
@@ -80,9 +81,8 @@ from .injection import resolve_kwargs, unresolvable_params
 from .middleware import Middleware
 from .routing import (
     Registration,
-    command_filters,
-    doc_summary,
-    message_filters,
+    ptb_handler,
+    split_docstring,
     validate_command_name,
 )
 from .screens import Screen
@@ -93,6 +93,9 @@ END = ConversationHandler.END
 #: state selector meaning "every state this conversation declares" -- for the
 #: handler that belongs everywhere, typically a Cancel button
 ANY_STATE = "*"
+
+#: distinguishes "no state passed" from an explicit ``state=None``
+_UNSET = object()
 
 #: PTB internals :meth:`Conversation.end_run` needs to end a peer's live run.
 #: Private, so no version bound protects them -- see ``_check_exclusive_support``.
@@ -125,6 +128,7 @@ class _Step:
         description: str = "",
         scope: str = "default",
         hidden: bool = False,
+        args: bool = False,
         edits: bool = False,
     ) -> None:
         self.fn = fn
@@ -137,11 +141,42 @@ class _Step:
         self.description = description
         self.scope = scope
         self.hidden = hidden
+        self.args = args
         self.edits = edits
 
     @property
     def is_entry(self) -> bool:
         return not self.states and not self.is_fallback
+
+    def registration(
+        self, conv_name: str, middlewares: list[Middleware] | None = None
+    ) -> Registration:
+        """The one Registration this step implies.
+
+        ``/help``, the command menus, and the wired PTB handler all read the
+        same record. ``kind`` states the transport -- a command entry without
+        ``args=True`` is still a command; whether its extra parameters are
+        parsed arguments or injected is ``args``'s business alone.
+        """
+        return Registration(
+            kind="command"
+            if self.command is not None
+            else "callback"
+            if self.callback is not None
+            else "message",
+            fn=self.fn,
+            name=f"{conv_name}.{self.fn.__name__}",
+            command=self.command,
+            description=self.description,
+            scope=self.scope,
+            hidden=self.hidden,
+            cb_model=self.callback,
+            cb_when=self.when,
+            filters=self.filters,
+            args=self.args,
+            edits=self.edits,
+            middlewares=middlewares or [],
+        )
 
 
 class Conversation:
@@ -170,15 +205,6 @@ class Conversation:
 
     # -- declaration -------------------------------------------------------------
 
-    def _check_command(self, command: str | None) -> None:
-        """Reject a name Telegram would refuse, at decoration time.
-
-        Every decorator that takes a ``command`` funnels through here, so the
-        owner string is written once and a new one cannot forget the check.
-        """
-        if command is not None:
-            validate_command_name(command, f"conversation {self.name!r}")
-
     def entry(
         self,
         command: str | None = None,
@@ -186,29 +212,41 @@ class Conversation:
         when: Callable[[Any], bool] | None = None,
         filters: Any = None,
         *,
+        args: bool = False,
+        edits: bool = False,
         description: str | None = None,
         scope: str = "default",
         hidden: bool = False,
-        edits: bool = False,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """An entry point: a command, a typed callback button, or a message filter.
 
         A command entry carries the same menu metadata as ``@router.command``:
         it is listed in ``/help`` and published to the Telegram command menu of
-        its ``scope`` unless ``hidden``. It parses no typed arguments, though,
-        so a parameter with a default keeps that default instead of being read
-        off the command line; ask for the value in a state. ``edits=True`` lets
-        an edit of an older message start the conversation, which by default it
-        cannot.
+        its ``scope`` unless ``hidden``.
+
+        ``args=True`` gives a command entry the same typed arguments a
+        ``@router.command`` handler gets, so a flow can start with what it
+        needs already in hand (``/order ABC 3``, or a ``t.me/bot?start=<x>``
+        deep link). Bad or missing arguments get the usage line back and the
+        run never starts -- entered with its arguments or not at all. Off by
+        default because an entry's extra parameters are injected, as they
+        always were, and a flow normally asks for what it needs one state at
+        a time.
         """
         if command is None and callback is None and filters is None:
             raise ConfigurationError(
                 "conversation entry needs a command, callback, or filters"
             )
-        self._check_command(command)
+        if args and command is None:
+            raise ConfigurationError(
+                "conversation entry: args=True needs a command; there is no "
+                "command line to read arguments from"
+            )
+        if command is not None:
+            validate_command_name(command)
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
-            desc = doc_summary(fn) if description is None else description
+            desc = split_docstring(fn)[0] if description is None else description
 
             self._steps.append(
                 _Step(
@@ -220,6 +258,7 @@ class Conversation:
                     description=desc,
                     scope=scope,
                     hidden=hidden,
+                    args=args,
                     edits=edits,
                 )
             )
@@ -242,12 +281,14 @@ class Conversation:
         the same handler on each, which is what a Cancel button wants.
         ``command="skip"`` makes the step a ``/skip`` command instead: valid
         only while the run sits in that state, so it stays out of ``/help``.
-        ``edits=True`` also feeds this step edits of older messages, which by
-        default reach no step: the run has usually moved on since.
+        ``when`` narrows the match on decoded callback data without swallowing
+        the press: a rejected button stays available to a sibling step on the
+        same model. ``edits=True`` opts the step in to edited messages.
         """
         if not names:
             raise ConfigurationError("conversation state needs at least one name")
-        self._check_command(command)
+        if command is not None:
+            validate_command_name(command)
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self._steps.append(
@@ -269,7 +310,7 @@ class Conversation:
         self, command: str = "cancel"
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """A fallback command that cancels the run (exit hook gets CANCELLED)."""
-        self._check_command(command)
+        validate_command_name(command)
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             self._steps.append(_Step(fn, command=command, is_fallback=True))
@@ -281,23 +322,12 @@ class Conversation:
         """Entry commands as discoverable registrations (``/help``, menus).
 
         Only entry points: a state's ``/skip`` or the ``/cancel`` fallback do
-        nothing outside a live run, so listing them would be noise.
-
-        These are for discovery alone -- the handler that actually runs is the
-        step, built in :meth:`build` -- so they take no typed arguments: the
-        conversation asks for what it needs, one state at a time.
+        nothing outside a live run, so listing them would be noise. The
+        ``args`` flag rides along so ``/help <command>`` knows whether the
+        entry's extra parameters are arguments or injected.
         """
         return [
-            Registration(
-                kind="command",
-                fn=step.fn,
-                name=f"{self.name}.{step.fn.__name__}",
-                command=step.command,
-                description=step.description,
-                scope=step.scope,
-                hidden=step.hidden,
-                parses_args=False,
-            )
+            step.registration(self.name)
             for step in self._steps
             if step.is_entry and step.command is not None
         ]
@@ -353,20 +383,13 @@ class Conversation:
         fallbacks: list[Any] = []
 
         for step in self._steps:
-            reg = Registration(
-                kind="callback" if step.callback else "message",
-                fn=step.fn,
-                name=f"{self.name}.{step.fn.__name__}",
-                cb_model=step.callback,
-                cb_when=step.when,
-                middlewares=middlewares,
-            )
+            reg = step.registration(self.name, middlewares)
             # Same build-time check every other handler gets: a step that
             # declares an unknown parameter fails here, not on the update that
             # finally reaches it.
             dispatch.validate(reg)
             callback = self._make_callback(dispatch, reg, step, known_states)
-            handler = self._ptb_handler(step, callback)
+            handler = ptb_handler(reg, callback)
             if step.is_fallback:
                 fallbacks.append(handler)
             elif step.is_entry:
@@ -479,19 +502,6 @@ class Conversation:
         self._clear_state(update, context)
         return True
 
-    def _ptb_handler(
-        self, step: _Step, callback: Callable[..., Coroutine[Any, Any, Any]]
-    ) -> Any:
-        if step.command is not None:
-            return CommandHandler(
-                step.command, callback, filters=command_filters(edits=step.edits)
-            )
-
-        if step.callback is not None:
-            return CallbackQueryHandler(callback, pattern=step.callback.matches)
-
-        return MessageHandler(message_filters(step.filters, edits=step.edits), callback)
-
     def _make_callback(
         self,
         dispatch: Dispatch,
@@ -499,21 +509,11 @@ class Conversation:
         step: _Step,
         state_names: set[str],
     ) -> Callable[[Any, Any], Coroutine[Any, Any, Any]]:
-        is_entry = step.is_entry
+        if step.is_entry:
+            return self._make_entry_callback(dispatch, reg, state_names)
 
         async def handle(update: Any, context: Any) -> Any:
-            if is_entry:
-                if self.exclusive:
-                    # Whatever else this caller had open is over: leaving it
-                    # live would let it keep matching their next message.
-                    for peer in self._peers:
-                        await peer.end_run(dispatch, update, context)
-
-                state = self.state_factory() if self.state_factory is not None else None
-                self._set_state(update, context, state)
-            else:
-                state = self._get_state(update, context)
-
+            state = self._get_state(update, context)
             result = await dispatch.run(reg, update, context, state=state)
 
             return await self._apply_result(
@@ -530,6 +530,64 @@ class Conversation:
 
         return handle
 
+    def _make_entry_callback(
+        self,
+        dispatch: Dispatch,
+        reg: Registration,
+        state_names: set[str],
+    ) -> Callable[[Any, Any], Coroutine[Any, Any, Any]]:
+        async def handle(update: Any, context: Any) -> Any:
+            # The state object exists for the handler to fill, but it is not
+            # stored -- and peers are not touched -- until the result proves a
+            # run actually started. Refused arguments, a failed guard, a
+            # throttle, or a bare Screen must leave no trace: no draft state,
+            # and the caller's *other* exclusive runs keep going.
+            state = self.state_factory() if self.state_factory is not None else None
+            result = await dispatch.run(reg, update, context, state=state)
+            next_state, screen = self._split_result(result, state_names)
+
+            if screen is not None and dispatch.delivery is not None:
+                await dispatch.delivery.render(update, screen)
+
+            if next_state is None:
+                return None  # no run started; PTB records nothing
+
+            # END did start and finish, so it counts as a start. Peers end
+            # only now, *after* the entry's screen went out: a peer's goodbye
+            # follows the new flow's hello rather than preceding it.
+            if self.exclusive:
+                for peer in self._peers:
+                    await peer.end_run(dispatch, update, context)
+
+            if next_state == END:
+                await self._run_exit(
+                    dispatch, update, context, ExitReason.FINISHED, state=state
+                )
+                return END
+
+            self._set_state(update, context, state)
+            return next_state
+
+        return handle
+
+    def _split_result(
+        self, result: Any, state_names: set[str]
+    ) -> tuple[Any, Screen | None]:
+        """Normalize a handler result to ``(next_state | END | None, screen)``."""
+        screen: Screen | None = None
+        next_state: Any = result
+        if isinstance(result, tuple) and len(result) == 2:
+            next_state, screen = result
+        elif isinstance(result, Screen):
+            next_state = None  # already rendered by the pipeline core
+
+        if next_state is not None and next_state != END and next_state not in state_names:
+            raise ConfigurationError(
+                f"conversation {self.name!r}: handler returned unknown state {next_state!r}"
+            )
+
+        return next_state, screen
+
     async def _apply_result(
         self,
         dispatch: Dispatch,
@@ -541,12 +599,7 @@ class Conversation:
         end_reason: ExitReason,
         force_end: bool,
     ) -> Any:
-        screen: Screen | None = None
-        next_state: Any = result
-        if isinstance(result, tuple) and len(result) == 2:
-            next_state, screen = result
-        elif isinstance(result, Screen):
-            next_state = None  # already rendered by the pipeline core
+        next_state, screen = self._split_result(result, state_names)
 
         if screen is not None and dispatch.delivery is not None:
             await dispatch.delivery.render(update, screen)
@@ -556,15 +609,7 @@ class Conversation:
             self._clear_state(update, context)
             return END
 
-        if next_state is None:
-            return None  # stay in the current state
-
-        if next_state not in state_names:
-            raise ConfigurationError(
-                f"conversation {self.name!r}: handler returned unknown state {next_state!r}"
-            )
-
-        return next_state
+        return next_state  # a state name, or None to stay put
 
     def _make_timeout_callback(
         self, dispatch: Dispatch
@@ -577,13 +622,21 @@ class Conversation:
         return on_timeout
 
     async def _run_exit(
-        self, dispatch: Dispatch, update: Any, context: Any, reason: ExitReason
+        self,
+        dispatch: Dispatch,
+        update: Any,
+        context: Any,
+        reason: ExitReason,
+        *,
+        state: Any = _UNSET,
     ) -> None:
         if self._exit_hook is None:
             return
 
         inv = dispatch.invocation(f"{self.name}.on_exit", update, context)
-        inv.state = self._get_state(update, context)
+        # An entry that started and finished in one step never stored its
+        # state, so the caller hands it over instead of the store.
+        inv.state = self._get_state(update, context) if state is _UNSET else state
         inv.extras["reason"] = reason
         try:
             kwargs = await resolve_kwargs(self._exit_hook, inv, dispatch.providers)

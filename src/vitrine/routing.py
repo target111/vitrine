@@ -27,9 +27,14 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+)
 from telegram.ext import filters as ptb_filters
 
-from .callbacks import CallbackData
+from .callbacks import CallbackData, pattern_for
 from .exceptions import ConfigurationError
 from .middleware import Middleware
 from .screens import ReplyButton
@@ -37,87 +42,49 @@ from .screens import ReplyButton
 if TYPE_CHECKING:
     from .conversations import Conversation
 
-#: what a message handler matches when the caller names no filters
-DEFAULT_MESSAGE_FILTERS = ptb_filters.TEXT & ~ptb_filters.COMMAND
+#: what Telegram accepts in a command name. PTB lowercases before validating,
+#: so an invalid name dispatches fine locally while ``setMyCommands`` rejects
+#: the whole batch it appears in -- hence the check happens here, at
+#: registration, where the offending decorator is on the stack.
+_COMMAND_NAME = re.compile(r"[a-z0-9_]{1,32}\Z")
 
-#: Telegram's rule for ``BotCommand.command``
-_COMMAND_NAME = re.compile(r"^[a-z0-9_]{1,32}$")
 
-
-def validate_command_name(command: str, owner: str) -> str:
-    """Reject at registration a command ``setMyCommands`` would refuse.
-
-    PTB's ``CommandHandler`` lowercases a command before it validates it, so
-    ``/myCmd`` dispatches happily while that same name in the published menu
-    makes Telegram reject the *whole* batch -- leaving every menu, in every
-    scope, frozen at what the previous run published, with only a log line to
-    say so. Cheaper as an import-time error.
-    """
-    if not _COMMAND_NAME.match(command):
+def validate_command_name(name: str) -> str:
+    if not _COMMAND_NAME.fullmatch(name):
         raise ConfigurationError(
-            f"{owner}: {command!r} is not a valid command name. Telegram allows "
-            f"1-32 characters from a-z, 0-9 and underscore -- no uppercase."
+            f"command name {name!r} would be rejected by Telegram: names are "
+            f"1-32 characters of lowercase a-z, 0-9 and underscore. PTB would "
+            f"still dispatch it, but publishing it would silently freeze every "
+            f"command menu at whatever the previous run wrote."
         )
 
-    return command
+    return name
 
 
-#: Telegram delivers an edit as a new update carrying the whole message, and
-#: PTB's defaults match those too: editing an old ``/help`` into ``/whatever``
-#: runs ``/whatever``, and editing any old text message re-feeds it to message
-#: handlers -- including whichever conversation state is live *now*, several
-#: steps past the one that first read it. Handlers are narrowed to this unless
-#: they ask for edits with ``edits=True``.
-FRESH_MESSAGES = ptb_filters.UpdateType.MESSAGE
+def split_docstring(fn: Callable[..., Any]) -> tuple[str, str]:
+    """Split a handler docstring into (summary, detail body).
 
-
-def command_filters(*, edits: bool) -> Any:
-    """Filters for a ``CommandHandler``; ``None`` leaves PTB's own default."""
-    return None if edits else FRESH_MESSAGES
-
-
-def message_filters(filters: Any, *, edits: bool) -> Any:
-    """Filters for a ``MessageHandler``; ``None`` means the text default."""
-    base = DEFAULT_MESSAGE_FILTERS if filters is None else filters
-
-    return base if edits else base & FRESH_MESSAGES
-
-
-def _doc_parts(fn: Callable[..., Any]) -> tuple[str, str]:
-    """Split a docstring into its summary paragraph and everything after it.
-
-    The split is the first blank line, not the first newline: a summary that
-    wraps across two source lines is still one sentence, and cutting it at the
-    wrap truncated the command description mid-phrase -- in ``/help``, and in
-    the description published to Telegram's command menu.
+    The summary is the whole first *paragraph* -- not the first line, because a
+    summary that wraps across two source lines would otherwise be cut at the
+    wrap, and the orphaned remainder would open the detail text. Everything
+    after the first blank line is the detail body, shown by ``/help <command>``.
     """
-    summary, _, body = inspect.cleandoc(fn.__doc__ or "").partition("\n\n")
+    # cleandoc already drops leading blank lines, so the paragraph starts at 0.
+    lines = inspect.cleandoc(fn.__doc__ or "").splitlines()
+    end = next((i for i, line in enumerate(lines) if not line.strip()), len(lines))
 
-    return " ".join(summary.split()), body.strip()
+    summary = " ".join(line.strip() for line in lines[:end])
+    detail = "\n".join(lines[end:]).strip()
 
-
-def doc_summary(fn: Callable[..., Any]) -> str:
-    """A handler's summary: the docstring's first paragraph, as one line.
-
-    The default command description. ``""`` when there is nothing to take,
-    including a docstring that is only whitespace.
-    """
-    return _doc_parts(fn)[0]
-
-
-def doc_body(fn: Callable[..., Any]) -> str:
-    """Everything in the docstring after the summary paragraph, dedented.
-
-    The summary is already the command's one-line description, so this is the
-    detail ``/help <command>`` has room for and the command list does not.
-    """
-    return _doc_parts(fn)[1]
+    return summary, detail
 
 
 @dataclass
 class Registration:
     """One declaratively-registered handler and its metadata."""
 
+    #: the transport: which PTB handler carries the update. Says nothing about
+    #: how extra parameters are filled -- that is ``args`` alone.
     kind: str  # "command" | "callback" | "message"
     fn: Callable[..., Any]
     name: str
@@ -128,13 +95,57 @@ class Registration:
     cb_model: type[CallbackData] | None = None
     cb_when: Callable[[CallbackData], bool] | None = None
     filters: Any = None  # PTB filters for message handlers
-    edits: bool = False  # also match edited messages
-    #: False for a registration that exists only to be discovered, so
-    #: ``/help <command>`` does not read arguments off a signature that the
-    #: dispatcher never parses -- see ``Conversation.command_registrations``
-    parses_args: bool = True
     group: int = 0
+    edits: bool = False  # opt in to receiving edited messages
+    #: whether extra handler params are parsed command arguments (meaningful
+    #: only when the transport is a command). True for router commands; a
+    #: conversation entry only opts in via ``args=True`` (its extra params are
+    #: injected otherwise), and /help must not present injected parameters as
+    #: a usage line.
+    args: bool = True
     middlewares: list[Middleware] = field(default_factory=list)
+
+
+def _minus_edits(base: Any, edits: bool) -> Any:
+    return base if edits else base & ~ptb_filters.UpdateType.EDITED
+
+
+def ptb_handler(reg: Registration, callback: Callable[..., Any]) -> Any:
+    """The one PTB handler a registration implies.
+
+    Every registration -- the bot's flat handlers and every conversation step
+    -- is wired through here, so the edit-exclusion rule cannot drift between
+    call sites. The rule: take what the handler would otherwise match and
+    subtract ``UpdateType.EDITED``, unless ``edits=True`` -- exclude edits,
+    and nothing else. Subtracting matters: message handlers matched channel
+    posts and business messages before the exclusion existed and must keep
+    matching them, while commands matched only PTB's ``CommandHandler``
+    default (``UpdateType.MESSAGES``) and must not quietly widen beyond it.
+    The default is spelled out here so there is a baseline to subtract from,
+    instead of a replacement filter that encodes the reach and the exclusion
+    as one opaque choice.
+    """
+    if reg.kind == "command":
+        assert reg.command is not None
+        return CommandHandler(
+            reg.command,
+            callback,
+            filters=_minus_edits(ptb_filters.UpdateType.MESSAGES, reg.edits),
+        )
+
+    if reg.kind == "callback":
+        assert reg.cb_model is not None
+        # when= narrows inside the pattern: a rejected press stays available
+        # to a sibling handler on the same callback model. Presses have no
+        # edited form, so the edit rule does not apply.
+        return CallbackQueryHandler(
+            callback, pattern=pattern_for(reg.cb_model, reg.cb_when)
+        )
+
+    base = (
+        reg.filters if reg.filters is not None else ptb_filters.TEXT & ~ptb_filters.COMMAND
+    )
+    return MessageHandler(_minus_edits(base, reg.edits), callback)
 
 
 class Router:
@@ -160,21 +171,20 @@ class Router:
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a ``/command`` handler; extra params become typed arguments.
 
-        ``edits=True`` also fires the handler when a user edits an older
-        message into this command -- off by default, see :data:`FRESH_MESSAGES`.
+        ``edits=True`` opts in to also receiving edited messages -- by default
+        an edited ``/command`` is ignored, because Telegram redelivers the whole
+        message and editing an old command would otherwise re-run it.
         """
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
-            desc = doc_summary(fn) if description is None else description
+            desc = split_docstring(fn)[0] if description is None else description
 
             self.registrations.append(
                 Registration(
                     kind="command",
                     fn=fn,
                     name=fn.__name__,
-                    command=validate_command_name(
-                        command or fn.__name__, f"handler {fn.__name__!r}"
-                    ),
+                    command=validate_command_name(command or fn.__name__),
                     description=desc,
                     scope=scope,
                     hidden=hidden,
@@ -197,7 +207,15 @@ class Router:
         """Register a handler for one typed callback-data model.
 
         The decoded, validated instance is injected as the ``data`` parameter.
-        ``when`` optionally narrows the match on the decoded payload.
+        ``when`` optionally narrows the match on the decoded payload: a press
+        this handler's ``when`` rejects stays available to another handler on
+        the same model rather than being swallowed.
+
+        Callback handlers belong in the default group. A catch-all sits last in
+        that group to answer presses no handler took (Telegram spins the button
+        until *something* answers), Telegram accepts one answer per press, and
+        PTB runs groups independently -- so a callback handler in a later group
+        still runs, but its answer (and any alert) arrives too late to display.
         """
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -221,8 +239,9 @@ class Router:
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a message handler with PTB filters (defaults to text messages).
 
-        ``edits=True`` also fires the handler for edits of older messages --
-        off by default, see :data:`FRESH_MESSAGES`.
+        Edited messages are excluded unless ``edits=True``: an edit arrives as
+        a fresh update carrying the whole message, so without the exclusion,
+        editing any old text would re-feed it to this handler.
         """
 
         def register(fn: Callable[..., Any]) -> Callable[..., Any]:

@@ -36,6 +36,7 @@ live.
 from __future__ import annotations
 
 import urllib.parse
+from collections.abc import Callable
 from enum import Enum
 from typing import Any, ClassVar, Self
 
@@ -214,6 +215,34 @@ class CallbackData(BaseModel):
 
         prefix, _, _ = _split_prefix(data)
         return prefix == cls.__prefix__
+
+
+def pattern_for(
+    model: type[CallbackData],
+    when: Callable[[Any], bool] | None = None,
+) -> Callable[[object], bool]:
+    """PTB pattern predicate for one model, optionally narrowed by ``when``.
+
+    ``when`` runs on the decoded payload *inside the pattern*, so a press it
+    rejects is never claimed: PTB keeps trying later handlers (or sibling
+    conversation steps) on the same callback model instead of swallowing it.
+    A payload that fails to decode still matches, so the claiming handler can
+    answer with a friendly "button expired" instead of leaving a dead button.
+    """
+
+    def pattern(data: object) -> bool:
+        if not model.matches(data):
+            return False
+        if when is None:
+            return True
+        try:
+            decoded = model.unpack(data)  # type: ignore[arg-type]
+        except CallbackDataError:
+            return True
+
+        return bool(when(decoded))
+
+    return pattern
 
 
 def decode(data: str) -> CallbackData:

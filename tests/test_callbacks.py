@@ -188,7 +188,7 @@ def test_prefix_cannot_contain_wire_characters():
 
 
 def test_empty_string_field_rejected_at_pack_time():
-    """"" and omitted look identical on the wire; packing one must fail loudly."""
+    """ "" and omitted look identical on the wire; packing one must fail loudly."""
     with pytest.raises(CallbackDataError, match="empty string"):
         MenuCB(section="").pack()
     with pytest.raises(CallbackDataError, match="empty string"):

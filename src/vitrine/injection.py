@@ -23,7 +23,7 @@ Everything is resolved at most once per invocation and cached.
 from __future__ import annotations
 
 import inspect
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Set
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Callable, Set
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, get_args, get_origin
 
@@ -227,122 +227,115 @@ def unresolvable_params(
     return bad
 
 
-# -- provider/annotation agreement ---------------------------------------------
+# ---------------------------------------------------------------- annotation lint
 #
 # Injection is by name, so an annotation on an injected parameter is
-# documentation rather than a contract -- but when it plainly disagrees with
-# what the provider hands over, the handler fails somewhere downstream with an
-# AttributeError that names neither the parameter nor the provider. What
-# follows reports that disagreement at build time, and only where a subclass
-# test can settle it: everything else falls through unjudged, because a false
-# positive here would reject a working app.
+# documentation, not a contract -- duck-typed stand-ins are legitimate and test
+# suites rely on them. But when the annotation *provably* disagrees with what
+# the provider hands over, the eventual failure is an AttributeError deep
+# inside a handler that names neither the parameter nor the provider. The lint
+# reports only what a subclass test can settle; anything it cannot prove
+# (protocols, generics, unions, unannotated factories, TYPE_CHECKING-only
+# names) is left alone, because a false positive here rejects a working app.
 
 
-def _nominal_class(annotation: Any) -> type | None:
-    """``annotation`` as a class ``issubclass`` can judge, else ``None``.
-
-    ``Any``, unions, generics (``list[Order]``, ``int | None``), unresolved
-    forward references and protocols all mean "not decidable by subclassing" --
-    a protocol most of all, since satisfying one is exactly what a stand-in
-    that fails ``issubclass`` does.
-    """
-    if annotation is inspect.Parameter.empty or annotation is Any:
-        return None
-    if get_origin(annotation) is not None:
+def _checkable_class(annotation: Any) -> type | None:
+    """The annotation as a concrete class a subclass test can settle, or None."""
+    if annotation is None or annotation is Any:
         return None
     if not isinstance(annotation, type):
-        return None
+        return None  # generic aliases, unions, strings that never resolved, ...
     if getattr(annotation, "_is_protocol", False):
-        return None
+        return None  # a protocol is satisfied structurally, not by subclassing
 
     return annotation
 
 
-def _resolved_signature(fn: Callable[..., Any]) -> inspect.Signature | None:
-    """``fn``'s signature with real types, or ``None`` if they cannot be had.
+def _resolve_lax(annotation: Any, owner: Callable[..., Any]) -> Any:
+    """Evaluate a PEP 563 string annotation; ``None`` when it cannot resolve.
 
-    A ``TYPE_CHECKING``-only annotation anywhere makes the whole signature
-    unevaluable; giving up on the function is right, since no check at all is
-    always safe and guessing is not.
+    An unresolvable name is almost always a TYPE_CHECKING-only import, which
+    is exactly the kind of annotation the lint must leave alone.
+    """
+    if not isinstance(annotation, str):
+        return annotation
+    try:
+        return eval(annotation, getattr(owner, "__globals__", {}))  # noqa: S307
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _factory_return_type(factory: Callable[..., Any]) -> type | None:
+    """What a factory provably provides: its concrete return class, or None.
+
+    For an async generator the *yielded* type is what reaches the handler, so
+    the first argument of the ``AsyncGenerator``/``AsyncIterator`` annotation
+    is unwrapped; a bare or foreign return annotation proves nothing.
     """
     try:
-        return inspect.signature(fn, eval_str=True)
-    except Exception:  # noqa: BLE001 - any failure means "cannot judge"
+        annotation = inspect.signature(factory).return_annotation
+    except (TypeError, ValueError):
         return None
-
-
-def _yielded_class(annotation: Any) -> type | None:
-    """The ``X`` an ``AsyncIterator[X]``/``AsyncGenerator[X, ...]`` provider yields."""
-    if get_origin(annotation) not in (AsyncIterator, AsyncGenerator):
-        return None  # including a bare AsyncIterator, whose origin is None
-
-    return _nominal_class(get_args(annotation)[0])
-
-
-def _factory_supplies(factory: Callable[..., Any]) -> type | None:
-    """What ``factory`` promises to return, when it promises anything."""
-    signature = _resolved_signature(factory)
-    if signature is None:
+    if annotation is inspect.Parameter.empty:
         return None
+    annotation = _resolve_lax(annotation, factory)
 
-    annotation = signature.return_annotation
     if inspect.isasyncgenfunction(factory):
-        return _yielded_class(annotation)
+        if get_origin(annotation) not in (AsyncGenerator, AsyncIterator, AsyncIterable):
+            return None
+        args = get_args(annotation)
+        annotation = args[0] if args else None
 
-    return _nominal_class(annotation)
-
-
-def _supplied_class(name: str, providers: Providers) -> type | None:
-    value = providers.value(name)
-    if value is not _MISSING:
-        return type(value)
-
-    factory = providers.factory(name)
-
-    return _factory_supplies(factory) if factory is not None else None
+    return _checkable_class(annotation)
 
 
-def type_mismatches(
+def _numeric_ok(provided: type, annotation: type) -> bool:
+    """``int`` under a ``float`` annotation: the one implicit conversion Python makes."""
+    return annotation is float and issubclass(provided, int)
+
+
+def annotation_conflicts(
     fn: Callable[..., Any],
     providers: Providers,
     *,
-    extra_names: Set[str] = frozenset(),
-) -> list[tuple[str, type, type]]:
-    """``(parameter, annotated, supplied)`` for each provably wrong annotation.
+    skip: Set[str] = frozenset(),
+) -> list[str]:
+    """Provable annotation/provider disagreements in ``fn``'s signature.
 
-    Empty whenever anything is uncertain -- an unevaluable signature, a
-    protocol, a generic, a factory that annotates no return type.
+    Returns human-readable findings; empty means "nothing provable", not
+    "everything checked out".
     """
-    signature = _resolved_signature(fn)
-    if signature is None:
-        return []
-
-    bad: list[tuple[str, type, type]] = []
-    for param in signature.parameters.values():
+    findings: list[str] = []
+    fn_name = getattr(fn, "__name__", repr(fn))
+    for param in inspect.signature(fn).parameters.values():
         if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
             continue
-        if param.name in RESERVED_NAMES or param.name in extra_names:
+        annotation = _checkable_class(_resolve_lax(param.annotation, fn))
+        if annotation is None or param.annotation is inspect.Parameter.empty:
             continue
 
-        wanted = _nominal_class(param.annotation)
-        if wanted is None:
-            continue
-
+        # Every source reduces to the same question -- what class does it
+        # provably hand over? -- so they answer it and share the verdict.
         if isinstance(param.default, Depends):
-            supplied = _factory_supplies(param.default.factory)
+            provided = _factory_return_type(param.default.factory)
+            source = f"Depends({getattr(param.default.factory, '__name__', '?')})"
+        elif param.name in RESERVED_NAMES or param.name in skip:
+            continue
+        elif (value := providers.value(param.name)) is not _MISSING:
+            provided, source = type(value), "the registered value"
+        elif (factory := providers.factory(param.name)) is not None:
+            provided = _factory_return_type(factory)
+            source = f"provider {param.name!r}"
         else:
-            supplied = _supplied_class(param.name, providers)
-        if supplied is None:
             continue
 
-        try:
-            # int under a float annotation is the one implicit conversion
-            # Python makes and an annotation is expected to allow
-            if issubclass(supplied, wanted) or (wanted is float and supplied is int):
-                continue
-        except TypeError:  # an exotic metaclass; not ours to judge
+        if provided is None:
+            continue  # nothing provable about the factory's return
+        if issubclass(provided, annotation) or _numeric_ok(provided, annotation):
             continue
+        findings.append(
+            f"{fn_name}: parameter {param.name!r} is annotated "
+            f"{annotation.__name__!r} but {source} provides {provided.__name__!r}"
+        )
 
-        bad.append((param.name, wanted, supplied))
-
-    return bad
+    return findings

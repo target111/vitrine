@@ -150,18 +150,17 @@ def has_guards(fn: Callable[..., Any]) -> bool:
     )
 
 
-def guard_summary(fn: Callable[..., Any]) -> str:
-    """What ``fn``'s guards demand, in words; ``""`` when it is open to all.
+# Read access to the guard markers, so /help can *say* what governs a command
+# without reaching for the attribute names.
 
-    Read by ``/help <command>``, which is why it names the requirement rather
-    than the decorator: the caller wants to know what they need, not how the
-    handler was written.
-    """
-    parts: list[str] = []
-    if getattr(fn, _ADMIN_ATTR, False):
-        parts.append("admin")
-    parts.extend(sorted(set(getattr(fn, _ROLES_ATTR, ()))))
-    if parts:
-        return " + ".join(parts)
 
-    return "registration" if getattr(fn, _PRINCIPAL_ATTR, False) else ""
+def guard_roles(fn: Callable[..., Any]) -> tuple[str, ...]:
+    return getattr(fn, _ROLES_ATTR, ())
+
+
+def is_admin_only(fn: Callable[..., Any]) -> bool:
+    return bool(getattr(fn, _ADMIN_ATTR, False))
+
+
+def needs_principal(fn: Callable[..., Any]) -> bool:
+    return bool(getattr(fn, _PRINCIPAL_ATTR, False))

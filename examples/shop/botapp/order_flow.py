@@ -37,20 +37,17 @@ async def begin(state: OrderDraft, data: BuyCB, catalog: CatalogService):
     return "qty", views.ask_qty(product)
 
 
-@order_flow.entry(command="order", description="Order a product by its SKU")
-async def begin_by_command(state: OrderDraft, update, catalog: CatalogService):
+@order_flow.entry(command="order", description="Order a product by its SKU", args=True)
+async def begin_by_command(state: OrderDraft, sku: str, catalog: CatalogService):
     """An entry command is a real command: /order shows up in /help and in the
-    Telegram command menu, exactly like one declared with @router.command."""
-    # Steps are not command handlers, so they get no typed args -- read the
-    # text. END rather than None: a run that never really started is over, so
-    # the draft is cleared instead of lingering until the next order.
-    sku = (update.effective_message.text or "").partition(" ")[2].strip()
-    if not sku:
-        return END, Screen(text="Send /order <sku> — see /start for the catalog.")
+    Telegram command menu, exactly like one declared with @router.command.
 
-    # An unknown SKU raises UnknownProduct, which the DomainError handler in
-    # main.py turns into a screen. The step never returns a state, so no run
-    # starts -- the caller just gets the error and can try again.
+    args=True gives it @router.command's typed arguments too: a missing sku
+    gets the usage line back and the run never starts. An unknown SKU raises
+    UnknownProduct, which the DomainError handler in main.py turns into a
+    screen -- no state is returned, so no run starts there either, and the
+    caller's half-finished order (if any) is left alone.
+    """
     product = await catalog.get(sku)
     state.sku = sku
 
