@@ -6,60 +6,45 @@ Notable changes to vitrine. The format follows
 
 ## [0.4.0] - 2026-08-01
 
-The internals were substantially rewritten. Nothing exported from `vitrine`
-changed; the notes below cover the behaviour that did.
+Internals rewritten. Nothing exported from `vitrine` changed.
 
 ### Added
 
-- `args=True` on `@conv.entry`: the entry command takes the same typed
-  arguments `@router.command` does, so a flow can start with what it needs
-  already in hand -- `/order ABC 3`, or a `t.me/bot?start=<payload>` deep
-  link. Bad arguments get the usage line and the run never starts. States
-  and fallbacks keep their parameters injected, as before.
-- `bot.sync_commands(chats=...)` syncs just the named chats and touches
-  nothing else, not even the default menu. The right call after one
-  promotion, and a safe one even while a `scope_chats` resolver is having
-  a bad day.
+- `args=True` on `@conv.entry`: an entry command takes typed arguments like
+  `@router.command` does, so a flow can start with what it needs (`/order ABC 3`,
+  or a `t.me/bot?start=<payload>` deep link). Bad arguments get the usage line
+  and the run never starts.
+- `bot.sync_commands(chats=...)` syncs only the named chats, leaving every other
+  menu untouched, including the default one.
 
 ### Changed
 
-- `sync_commands()` skips chats whose menu already holds what it would
-  write: a full re-sync after one promotion costs one API round-trip, not
-  one per scoped chat.
-- Menu publishing is now a `vitrine.commands.CommandMenus` object holding
-  the process's record of what it has published, replacing the
-  `sync_command_menus()` function and its `published_chats=` argument.
-  `vitrine.routing.doc_summary` and `doc_body` are one `split_docstring`
-  returning both halves, and `validate_command_name` no longer takes an
-  `owner`. Nothing exported from `vitrine` changes.
+- `sync_commands()` skips chats whose menu already holds what it would write, so
+  a full re-sync costs one API round-trip rather than one per scoped chat.
+- `commands.sync_command_menus()` is now a `CommandMenus` object owning the
+  process's record of what it published. `routing.doc_summary` and `doc_body`
+  are one `split_docstring`; `validate_command_name` drops its `owner` argument.
+  None of these are exported.
 
 ### Fixed
 
-- A conversation step whose `when=` rejects a button press no longer
-  swallows it: `when` narrows the PTB pattern, as it always has outside
-  conversations, so a sibling step on the same model gets to match. A press
-  every step rejects is answered by a catch-all handler, so the button no
-  longer spins until Telegram gives up on it. The catch-all sits last in
-  group 0, so keep callback handlers there (the default): Telegram takes one
-  answer per press, and an alert from a later group arrives too late to show.
-- A conversation entry that starts no run -- refused arguments, a failed
-  guard, a bare `Screen` -- no longer ends the caller's other exclusive runs
-  or leaves a draft state behind. Peers now end right after the entry's
-  screen renders, so a peer's goodbye follows the new flow's hello. An entry
-  returning `END` started and finished, so it still counts.
-- Naming `"default"` in `Bot(scope_chats=...)` is now a `ConfigurationError`:
-  its chats were getting a menu with every default command twice.
-- A chat named by more than one scope in `Bot(scope_chats=...)` now gets one
-  menu holding all of its scopes' commands. Telegram keeps a single chat
-  menu per chat, so writing one scope at a time left whichever came last --
-  an admin who was also a vip saw the vip menu and no `/ban`.
-- A first `sync_commands()` that fails no longer discards `known_scope_chats`:
-  the seed is consumed by the first sync that *completes*, so a database
-  down at startup -- exactly when the first sync runs -- no longer orphans
-  every historical chat's stale menu for the life of the process.
-- Concurrent `sync_commands()` calls are serialized, so overlapping syncs
-  can no longer drop each other's bookkeeping and then skip a chat that
-  still needed its menu rewritten.
+- A conversation step whose `when=` rejects a press no longer swallows it, so a
+  sibling step on the same model can match. A press no step takes is answered by
+  a catch-all, which sits last in group 0; keep callback handlers there, since
+  Telegram accepts one answer per press.
+- A conversation entry that starts no run (refused arguments, a failed guard, a
+  bare `Screen`) no longer ends the caller's other exclusive runs or leaves draft
+  state behind. Peers now end after the entry's screen renders. An entry
+  returning `END` still counts as having run.
+- Naming `"default"` in `Bot(scope_chats=...)` is a `ConfigurationError`. Those
+  chats were getting every default command listed twice.
+- A chat named by several scopes now gets one menu holding all of their commands.
+  Telegram stores a single chat-scoped menu, so writing one scope at a time left
+  whichever wrote last.
+- A failed first `sync_commands()` no longer discards `known_scope_chats`. The
+  seed is consumed by the first sync that completes, so a database that is down
+  at startup no longer orphans every stale menu for the life of the process.
+- Concurrent `sync_commands()` calls are serialized, including the scope read.
 
 ## [0.3.0] - 2026-07-31
 
