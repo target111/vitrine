@@ -202,6 +202,37 @@ async def test_activity_resets_the_timeout():
         assert exits == [] and live(conv)[0] == "qty"
 
 
+async def test_a_slow_step_does_not_time_out_under_itself():
+    exits: list[ExitReason] = []
+    conv = Conversation("t_slow", OrderState, timeout=0.05)
+
+    @conv.entry(command="slow")
+    async def start():
+        return "item"
+
+    @conv.state("item")
+    async def got_item(state: OrderState, update):
+        await asyncio.sleep(0.15)  # outlasts the timeout
+        state.item = update.effective_message.text
+        return "qty", Screen(text="how many?")
+
+    @conv.state("qty")
+    async def got_qty(): ...
+
+    @conv.on_exit
+    async def on_exit(reason: ExitReason):
+        exits.append(reason)
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/slow")
+        await client.send("widget")
+        assert exits == []
+        assert live(conv) == ("qty", OrderState(item="widget"))
+
+        await asyncio.sleep(0.15)  # the clock restarted once the step finished
+        assert exits == [ExitReason.TIMEOUT]
+
+
 async def test_an_exit_hook_can_say_goodbye_on_timeout():
     conv = Conversation("t_bye", timeout=0.02)
 

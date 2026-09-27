@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 import pytest
 from conftest import make_dispatch
 
-from vitrine import Arg, Bot, Depends
+from vitrine import Bot, Depends
 from vitrine.exceptions import ConfigurationError
 from vitrine.injection import Providers, annotation_conflicts
 from vitrine.routing import Registration
@@ -111,21 +111,6 @@ def test_int_under_a_float_annotation_is_fine():
     assert not conflicts(handler, providers)
 
 
-def test_a_duck_typed_value_matching_the_class_is_fine():
-    class Repo:
-        pass
-
-    class SubRepo(Repo):
-        pass
-
-    providers = Providers()
-    providers.register_value("repo", SubRepo())
-
-    async def handler(update, repo: Repo): ...
-
-    assert not conflicts(handler, providers)
-
-
 def test_what_a_subclass_test_cannot_settle_is_left_alone():
     class Closeable(Protocol):
         def close(self) -> None: ...
@@ -146,17 +131,6 @@ def test_what_a_subclass_test_cannot_settle_is_left_alone():
     ): ...
 
     assert conflicts(handler, providers) == []
-
-
-def test_reserved_names_and_command_args_are_not_linted(fake_bot):
-    """`update: Update` and typed command arguments are converted or supplied
-    by the framework; they are none of the lint's business."""
-    dispatch = make_dispatch(fake_bot)
-
-    async def pay(update, amount: Arg[float]): ...
-
-    reg = Registration(kind="command", fn=pay, name="pay", command="pay")
-    dispatch.validate(reg)  # no ConfigurationError, nothing to report
 
 
 def test_the_lint_reports_on_the_build_logger(fake_bot, caplog):

@@ -548,14 +548,21 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
             return
         run.update, run.context = update, context
 
-        # None too when a middleware answered without calling the step
-        outcome = await self.dispatch.run(
-            mounted.reg,
-            update,
-            context,
-            state=run.state,
-            on_result=self._interpret(update),
-        )
+        # A slow step mustn't time out under itself: the clock restarts after it.
+        self._disarm(run)
+        try:
+            # None too when a middleware answered without calling the step
+            outcome = await self.dispatch.run(
+                mounted.reg,
+                update,
+                context,
+                state=run.state,
+                on_result=self._interpret(update),
+            )
+        except BaseException:
+            if self.runs.get(key) is run:
+                self._arm(key, run)  # don't leave the run unable to expire
+            raise
         if self.runs.get(key) is not run:
             return  # ended while the step ran
 
@@ -624,13 +631,17 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
 
     def _arm(self, key: tuple[int | None, int | None], run: _Run) -> None:
         """(Re)start the run's inactivity timer; any handled update resets it."""
-        if run.timer is not None:
-            run.timer.cancel()
-            run.timer = None
+        self._disarm(run)
         if self.conv.timeout is not None:
             run.timer = asyncio.get_running_loop().create_task(
                 self._expire(key, run), name=f"vitrine-conv-timeout-{self.conv.name}"
             )
+
+    @staticmethod
+    def _disarm(run: _Run) -> None:
+        if run.timer is not None:
+            run.timer.cancel()
+            run.timer = None
 
     async def _expire(self, key: tuple[int | None, int | None], run: _Run) -> None:
         assert self.conv.timeout is not None

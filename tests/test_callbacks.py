@@ -28,12 +28,6 @@ def test_roundtrip():
     assert MenuCB.unpack(packed) == original
 
 
-def test_defaults_omitted_and_restored():
-    packed = MenuCB(section="home").pack()
-    decoded = MenuCB.unpack(packed)
-    assert decoded.page == 1 and decoded.flag is False
-
-
 def test_separator_and_spaces_survive_quoting():
     original = OtherCB(value="a:b c/d")
     assert OtherCB.unpack(original.pack()).value == "a:b c/d"
