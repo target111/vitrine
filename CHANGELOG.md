@@ -4,6 +4,77 @@ Notable changes to vitrine. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - Unreleased
+
+Conversations, dependency scopes and handler ordering reworked. Several
+changes break existing code; each is listed under **Breaking** with its fix.
+
+### Added
+
+- `vitrine.testing`: `TestClient` drives a bot through PTB's real dispatcher
+  with Telegram faked at the HTTP layer (`FakeTelegram`), recording every Bot
+  API call. `send`, `press`, `edit` and `feed` each return the calls one
+  update produced.
+- `Arg[T]` marks a command argument explicitly (type checkers see `T`).
+- `CANCEL`: a conversation step returns it to end the run as `CANCELLED`, so
+  a Cancel *button* reports the same reason as the `/cancel` fallback.
+- An exit hook may return a `Screen`, e.g. a goodbye on `TIMEOUT`.
+- `Conversation.active(chat_id=..., user_id=...)` returns a caller's live run.
+- `Bot(menu_store=...)` and the `MenuStore` protocol: remember published
+  command menus across restarts, so unchanged chats are skipped and chats
+  demoted while the bot was down are still cleared.
+- `bot.build(request=..., get_updates_request=...)` swaps PTB's HTTP
+  transports (pass separate instances: a long poll holds its connection);
+  building again with different ones raises. `bot.startup()`, `bot.stop()`
+  and `bot.shutdown()` run vitrine's lifecycle for apps that drive the
+  application themselves.
+- Build-time errors for handlers that could never run: the same command
+  registered twice, or a callback handler behind one -- or behind a
+  conversation entry -- that takes every press of its model.
+
+### Changed
+
+- **Breaking:** command arguments must be declared with `Arg[T]` (or
+  `Greedy`); every other parameter is injected. A parameter nothing can
+  supply is now a build error naming it, instead of silently becoming an
+  argument, and registering a provider no longer changes a command's syntax.
+  Replace `amount: float` with `amount: Arg[float]`.
+- **Breaking:** `@conv.entry(args=True)` is gone; an entry command parses the
+  `Arg[...]` parameters it declares.
+- **Breaking:** `END` is vitrine's own sentinel rather than PTB's
+  `ConversationHandler.END`; return `END` (or `CANCEL`) from steps.
+- **Breaking:** registering anything after `build()` (or `run()`) raises
+  `ConfigurationError` instead of being silently ignored.
+- **Breaking:** passing both `scope_chats` and `scope_member` is a
+  `ConfigurationError`. With `scope_chats`, `/help` shows a chat exactly the
+  scopes its command menu carries.
+- Conversations run on vitrine's own state machine instead of wrapping PTB's
+  `ConversationHandler`: one record per live run, no PTB internals.
+  `exclusive=True` works on any PTB version. Steps' screens, result
+  validation and exit hooks now run inside the pipeline, so they get error
+  UX, middleware and the per-update log line.
+- One dependency scope per update: the ban gate, every handler group,
+  conversation hooks and error handlers share resolved providers and the
+  principal, and generator cleanups run after the whole update. A cleanup
+  that fails (a commit, say) still reaches `@bot.on_error` handlers.
+- The startup command menu sync runs in the background, and Telegram's flood
+  control (`RetryAfter`) is waited out instead of skipping the chat.
+- Registration decorators are fully typed and return the decorated function
+  unchanged.
+
+### Fixed
+
+- A conversation step no longer loses its caller's messages to a plain
+  `@bot.message()` handler. Conversations now come before the bot's other
+  handlers in group 0; reply-keyboard buttons still come first.
+- A principal loaded with a generator provider (a database session) is no
+  longer handed to handlers after that provider was cleaned up by the ban
+  gate.
+- A non-admin in a `scope_chats` scope no longer sees commands in their
+  Telegram menu that `/help` then calls unknown.
+- A large `scope_chats` no longer delays the bot's first answer until every
+  menu is written.
+
 ## [0.4.0] - 2026-08-01
 
 Internals rewritten. Nothing exported from `vitrine` changed.
@@ -185,6 +256,7 @@ First release on PyPI as `vitrine-tg` (import name: `vitrine`).
   rate limiting, a composable Markdown builder, and structured logging.
 
 [#1]: https://github.com/target111/vitrine/issues/1
+[0.5.0]: https://github.com/target111/vitrine/releases/tag/v0.5.0
 [0.4.0]: https://github.com/target111/vitrine/releases/tag/v0.4.0
 [0.3.0]: https://github.com/target111/vitrine/releases/tag/v0.3.0
 [0.2.0]: https://github.com/target111/vitrine/releases/tag/v0.2.0

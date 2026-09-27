@@ -1,18 +1,20 @@
 """The handler pipeline: one code path every framework handler goes through.
 
 For each update:  decode callback data -> middleware chain -> guards ->
-throttle -> parse command args -> inject -> call handler -> render returned
-Screen -> error UX -> cleanups -> one structured log line.
+throttle -> parse command args -> inject -> call handler -> handle the result
+(render a returned Screen, or a conversation's transition) -> error UX ->
+one structured log line.
 
-Conversations reuse ``Dispatch.run`` with a state object; workers and lifecycle
-hooks reuse ``Dispatch.invocation`` for injection without an update.
+Conversations run their steps and exit hooks through :meth:`Dispatch.run`;
+workers and lifecycle hooks use :meth:`Dispatch.invocation` for injection
+without an update.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 from telegram.error import TelegramError
@@ -20,12 +22,13 @@ from telegram.error import TelegramError
 from .args import ArgSpec, build_arg_specs, parse_args
 from .auth import Auth, has_guards
 from .callbacks import CallbackDataError
+from .errors import ErrorRegistry
 from .exceptions import ConfigurationError
 from .injection import (
-    RESERVED_NAMES,
     Invocation,
     Providers,
     annotation_conflicts,
+    join_update_scope,
     resolve_kwargs,
     unresolvable_params,
 )
@@ -39,6 +42,10 @@ logger = logging.getLogger("vitrine.update")
 build_logger = logging.getLogger("vitrine.build")
 
 EXPIRED_BUTTON_TEXT = "This button has expired."
+
+#: turns a handler's return value into the pipeline's result, inside the
+#: error-handled chain: the default renders a returned Screen
+ResultHandler = Callable[[Any], Awaitable[Any]]
 
 
 def command_arg_text(update: Any) -> str | None:
@@ -56,8 +63,9 @@ class Dispatch:
     def __init__(
         self,
         providers: Providers,
-        errors: Any,
+        errors: ErrorRegistry,
         limiter: RateLimiter,
+        delivery: Delivery,
         auth: Auth | None = None,
         middlewares: list[Middleware] | None = None,
         *,
@@ -66,10 +74,10 @@ class Dispatch:
         self.providers = providers
         self.errors = errors
         self.limiter = limiter
+        self.delivery = delivery
         self.auth = auth
         self.middlewares = middlewares or []  # bot-scoped, outermost
         self.strict_types = strict_types
-        self.delivery: Delivery | None = None  # attached at build time
         self._arg_specs: dict[int, list[ArgSpec]] = {}
 
     # -- wiring -----------------------------------------------------------------
@@ -77,6 +85,8 @@ class Dispatch:
     def invocation(
         self, handler_name: str, update: Any = None, context: Any = None
     ) -> Invocation:
+        """A resolution context; joins the update's scope when one is open."""
+        scope, owned = join_update_scope(update)
         return Invocation(
             update=update,
             context=context,
@@ -84,25 +94,15 @@ class Dispatch:
             delivery=self.delivery,
             principal_name=self.auth.name if self.auth else None,
             auth=self.auth,
+            scope=scope,
+            owns_scope=owned,
         )
 
     def arg_specs(self, reg: Registration) -> list[ArgSpec]:
-        """Compute (once) which params of a command handler are typed arguments.
-
-        Empty unless this registration actually parses a command line: the two
-        halves of that rule (the transport is a command, and ``args`` opted in)
-        live here, not at each call site -- ``args`` defaults to True, so a
-        caller that checked only one half would get specs for a message step.
-        """
-        if reg.kind != "command" or not reg.args:
-            return []
-
+        """The command arguments a registration parses (computed once)."""
         cached = self._arg_specs.get(id(reg.fn))
         if cached is None:
-            skip = RESERVED_NAMES | self.providers.names()
-            if self.auth is not None:
-                skip = skip | {self.auth.name}
-            cached = build_arg_specs(reg.fn, skip)
+            cached = build_arg_specs(reg.fn)
             self._arg_specs[id(reg.fn)] = cached
 
         return cached
@@ -110,20 +110,31 @@ class Dispatch:
     def validate(self, reg: Registration) -> None:
         """Build-time check: every handler param must have a source.
 
-        Also reports annotations that *provably* disagree with what their
-        provider hands over -- a warning on the ``vitrine.build`` logger, or a
-        build failure under ``strict_types`` -- because the alternative is an
-        ``AttributeError`` deep inside a handler that names neither the
-        parameter nor the provider.
+        Also reports annotations that provably disagree with their provider:
+        a warning on the ``vitrine.build`` logger, or a build failure under
+        ``strict_types``.
         """
+        specs = self.arg_specs(reg)
+        if specs and reg.kind != "command":
+            raise ConfigurationError(
+                f"handler {reg.name!r} declares command argument(s) "
+                f"{[spec.name for spec in specs]}, but it is a {reg.kind} handler: "
+                f"only commands have a command line to parse"
+            )
+
         extra = {self.auth.name} if self.auth else set()
-        extra = extra | {spec.name for spec in self.arg_specs(reg)}
+        extra = extra | {spec.name for spec in specs}
 
         bad = unresolvable_params(reg.fn, self.providers, extra_names=extra)
         if bad:
+            hint = (
+                "; if it is a command argument, annotate it as Arg[...]"
+                if reg.kind == "command"
+                else ""
+            )
             raise ConfigurationError(
                 f"handler {reg.name!r} declares parameter(s) {bad} that nothing can "
-                f"supply: not reserved, not a provider, not a command argument"
+                f"supply: not reserved, not a provider, not the principal{hint}"
             )
 
         conflicts = annotation_conflicts(reg.fn, self.providers, skip=extra)
@@ -143,11 +154,21 @@ class Dispatch:
     # -- the pipeline -------------------------------------------------------------
 
     async def run(
-        self, reg: Registration, update: Any, context: Any, *, state: Any = None
+        self,
+        reg: Registration,
+        update: Any,
+        context: Any,
+        *,
+        state: Any = None,
+        extras: dict[str, Any] | None = None,
+        on_result: ResultHandler | None = None,
+        answer_query: bool = True,
     ) -> Any:
+        """Run one handler; returns ``on_result``'s value, or None on failure."""
         started = time.monotonic()
         inv = self.invocation(reg.name, update, context)
         inv.state = state
+        inv.extras.update(extras or {})
 
         # Decode typed callback data first: malformed/stale data must fail safely.
         if reg.cb_model is not None:
@@ -158,6 +179,7 @@ class Dispatch:
             except CallbackDataError as exc:
                 logger.warning("stale/invalid callback data in %s: %s", reg.name, exc)
                 await self._answer_query(update, EXPIRED_BUTTON_TEXT)
+                await inv.aclose()
                 return None
 
         event = Event(
@@ -169,6 +191,7 @@ class Dispatch:
             extras=inv.extras,  # shared: middleware extras become injectable
         )
         inv.event = event
+        handle_result = on_result or self._render_screen(update)
 
         async def core(evt: Event) -> Any:
             if self.auth is not None and has_guards(reg.fn):
@@ -179,7 +202,7 @@ class Dispatch:
             if spec is not None:
                 await self.limiter.enforce(spec, evt)
 
-            specs = self.arg_specs(reg)
+            specs = self.arg_specs(reg) if reg.kind == "command" else []
             if specs:
                 assert reg.command is not None
                 inv.extras.update(parse_args(reg.command, specs, command_arg_text(update)))
@@ -189,10 +212,7 @@ class Dispatch:
             if hasattr(result, "__await__"):
                 result = await result
 
-            if isinstance(result, Screen):
-                await self._render(update, context, result)
-
-            return result
+            return await handle_result(result)
 
         chain = compose([*self.middlewares, *reg.middlewares], core)
         status = "ok"
@@ -206,7 +226,8 @@ class Dispatch:
             await self.errors.dispatch(exc, inv, self.providers)
         finally:
             await inv.aclose()
-            await self._answer_query(update)
+            if answer_query:
+                await self._answer_query(update)
             user = getattr(update, "effective_user", None)
             chat = getattr(update, "effective_chat", None)
             log_event(
@@ -221,9 +242,13 @@ class Dispatch:
 
         return result
 
-    async def _render(self, update: Any, context: Any, screen: Screen) -> None:
-        delivery = self.delivery or Delivery(context.bot)
-        await delivery.render(update, screen)
+    def _render_screen(self, update: Any) -> ResultHandler:
+        async def render(result: Any) -> Any:
+            if isinstance(result, Screen):
+                await self.delivery.render(update, result)
+            return result
+
+        return render
 
     @staticmethod
     async def _answer_query(update: Any, text: str | None = None) -> None:

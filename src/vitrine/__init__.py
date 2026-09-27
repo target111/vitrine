@@ -7,11 +7,12 @@ typed error UX — while PTB's dispatcher, handlers, and filters stay fully
 reachable underneath.
 """
 
-from .app import Bot, VitrineContext
-from .args import Greedy
+from .app import Bot, VitrineApplication, VitrineContext
+from .args import Arg, Greedy
 from .auth import Auth, admin_only, requires, requires_principal
 from .callbacks import CallbackData
-from .conversations import ANY_STATE, END, Conversation, ExitReason
+from .commands import InMemoryMenuStore, MenuStore
+from .conversations import ANY_STATE, CANCEL, END, Conversation, ExitReason
 from .exceptions import (
     AuthError,
     BannedError,
@@ -52,12 +53,14 @@ from .screens import (
 __all__ = [
     "ANY_STATE",
     "Animation",
+    "Arg",
     "Audio",
     "Auth",
     "AuthError",
     "BannedError",
     "Bot",
     "Button",
+    "CANCEL",
     "ButtonStyle",
     "CallbackData",
     "CallbackDataError",
@@ -69,15 +72,16 @@ __all__ = [
     "END",
     "Event",
     "ExitReason",
-    "VitrineContext",
     "FileIdCache",
     "FrameworkError",
     "Greedy",
     "InMemoryFileIdCache",
+    "InMemoryMenuStore",
     "InjectionError",
     "Invocation",
     "ListSource",
     "Media",
+    "MenuStore",
     "NotAuthorizedError",
     "NotRegisteredError",
     "Page",
@@ -94,6 +98,8 @@ __all__ = [
     "UsageError",
     "UserFacingError",
     "Video",
+    "VitrineApplication",
+    "VitrineContext",
     "Voice",
     "admin_only",
     "audit",

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from vitrine import (
     END,
+    Arg,
     Auth,
     Bot,
     Button,
@@ -194,7 +195,7 @@ async def me(user: Profile):
 
 
 @bot.command("add", description="Add two numbers")
-async def add(a: float, b: float):
+async def add(a: Arg[float], b: Arg[float]):
     """Typed args: /add 2 40 — arity/type errors produce automatic usage help."""
     return Screen(text=Md().line(code(a), " + ", code(b), " = ", bold(str(a + b))))
 
@@ -217,14 +218,14 @@ async def crash():
 
 @bot.command("ban", description="Ban a user by id", scope="admin")
 @admin_only
-async def ban(target_id: int, user: Profile):
+async def ban(target_id: Arg[int], user: Profile):
     PROFILES.setdefault(target_id, Profile(id=target_id, name="?")).banned = True
     return Screen(text=Md().line("Banned ", code(target_id), "."))
 
 
 @bot.command("promote", description="Grant a role", scope="admin")
 @requires("admin")
-async def promote(target_id: int, role: str = "moderator"):
+async def promote(target_id: Arg[int], role: Arg[str] = "moderator"):
     PROFILES.setdefault(target_id, Profile(id=target_id, name="?")).roles.add(role)
     return Screen(text=Md().line("Gave ", code(target_id), " the ", bold(role), " role."))
 
@@ -320,8 +321,8 @@ async def feedback_body(state: FeedbackState, update, user: Profile):
 
 
 @feedback.cancel()
-async def feedback_cancel(update):
-    await update.effective_message.reply_text("Cancelled.")
+async def feedback_cancel():
+    return Screen(text="Cancelled.")
 
 
 @feedback.on_exit

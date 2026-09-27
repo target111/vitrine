@@ -5,7 +5,7 @@ from __future__ import annotations
 from domain.models import User
 from domain.services import OrderService, UserService
 
-from vitrine import Paginator, Router, Screen, admin_only, throttle
+from vitrine import Arg, Paginator, Router, Screen, admin_only, throttle
 from vitrine.logging import audit
 from vitrine.markdown import Md, code
 
@@ -42,7 +42,7 @@ async def users_page_cb(data: UsersPageCB, user_service: UserService):
 
 @router.command("ban", description="Ban a user: /ban <tg_id>", scope="admin")
 @admin_only
-async def ban(user: User, user_service: UserService, tg_id: int):
+async def ban(user: User, user_service: UserService, tg_id: Arg[int]):
     await user_service.set_banned(tg_id, True)
     audit("user.banned", actor=user.tg_id, target=tg_id)
 
@@ -51,7 +51,7 @@ async def ban(user: User, user_service: UserService, tg_id: int):
 
 @router.command("unban", description="Lift a ban: /unban <tg_id>", scope="admin")
 @admin_only
-async def unban(user: User, user_service: UserService, tg_id: int):
+async def unban(user: User, user_service: UserService, tg_id: Arg[int]):
     await user_service.set_banned(tg_id, False)
     audit("user.unbanned", actor=user.tg_id, target=tg_id)
 
@@ -60,7 +60,9 @@ async def unban(user: User, user_service: UserService, tg_id: int):
 
 @router.command("grant", description="Grant a role: /grant <tg_id> [role]", scope="admin")
 @admin_only
-async def grant(user: User, user_service: UserService, tg_id: int, role: str = "support"):
+async def grant(
+    user: User, user_service: UserService, tg_id: Arg[int], role: Arg[str] = "support"
+):
     await user_service.grant(tg_id, role)
     audit("role.granted", actor=user.tg_id, target=tg_id, role=role)
 

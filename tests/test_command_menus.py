@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from conftest import FakeBot
 from telegram import BotCommandScopeChat, BotCommandScopeDefault
 
-from vitrine import Bot, Conversation
+from vitrine import Auth, Bot, Conversation, Screen
 from vitrine.commands import CommandMenus
 from vitrine.exceptions import ConfigurationError
 from vitrine.routing import Registration
+from vitrine.testing import TestClient, sent_texts
 
 
 def reg(command: str, scope: str = "default", description: str = "") -> Registration:
@@ -407,7 +407,7 @@ def test_a_scope_with_no_chats_is_a_configuration_error():
     async def ban(update): ...
 
     with pytest.raises(ConfigurationError, match="admins"):
-        bot._wire_handlers()
+        bot.build()
 
 
 def test_a_conversation_entry_scope_is_checked_too():
@@ -422,7 +422,7 @@ def test_a_conversation_entry_scope_is_checked_too():
 
     bot.conversation(conv)
     with pytest.raises(ConfigurationError, match="admins"):
-        bot._wire_handlers()
+        bot.build()
 
 
 def test_scope_is_just_a_help_grouping_without_scope_chats():
@@ -431,7 +431,7 @@ def test_scope_is_just_a_help_grouping_without_scope_chats():
     @bot.command("ban", scope="admins")
     async def ban(update): ...
 
-    bot._wire_handlers()  # no scope_chats configured: nothing to check against
+    bot.build()  # no scope_chats configured: nothing to check against
 
 
 def test_a_hidden_commands_scope_is_not_checked():
@@ -442,7 +442,7 @@ def test_a_hidden_commands_scope_is_not_checked():
     @bot.command("internal", scope="whatever", hidden=True)
     async def internal(update): ...
 
-    bot._wire_handlers()
+    bot.build()
 
 
 @pytest.mark.parametrize("name", ["myCmd", "with space", "über", "x" * 33, "-x"])
@@ -477,43 +477,182 @@ def test_conversation_decorators_validate_command_names():
         conv.cancel(command="STOP")
 
 
+# ------------------------------------------------------------- the store
+
+
+class DictStore:
+    """A 'persistent' store: survives across CommandMenus instances."""
+
+    def __init__(self) -> None:
+        self.data: dict[int, str] = {}
+
+    async def load(self) -> dict[int, str]:
+        return dict(self.data)
+
+    async def set(self, chat_id: int, fingerprint: str) -> None:
+        self.data[chat_id] = fingerprint
+
+    async def discard(self, chat_id: int) -> None:
+        self.data.pop(chat_id, None)
+
+
+async def test_a_persistent_store_skips_unchanged_chats_across_restarts(fake_bot):
+    store = DictStore()
+    await CommandMenus(store=store).sync(fake_bot, REGS, scopes(admin=[1, 2]))
+    fake_bot.calls.clear()
+
+    restarted = CommandMenus(store=store)  # a new process, same store
+    await restarted.sync(fake_bot, REGS, scopes(admin=[1, 2]))
+
+    assert chat_writes(fake_bot) == {}
+
+
+async def test_a_persistent_store_clears_chats_demoted_while_down(fake_bot):
+    """No seed needed: the store remembers which chats hold a menu."""
+    store = DictStore()
+    await CommandMenus(store=store).sync(fake_bot, REGS, scopes(admin=[1, 2]))
+    fake_bot.calls.clear()
+
+    await CommandMenus(store=store).sync(fake_bot, REGS, scopes(admin=[1]))
+
+    assert deleted_chats(fake_bot) == [2]
+    assert set(store.data) == {1}
+
+
+class FlakyStore(DictStore):
+    """Refuses writes for the chats in ``down``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.down: set[int] = set()
+
+    async def set(self, chat_id: int, fingerprint: str) -> None:
+        if chat_id in self.down:
+            raise ConnectionError("store unavailable")
+        await super().set(chat_id, fingerprint)
+
+    async def discard(self, chat_id: int) -> None:
+        if chat_id in self.down:
+            raise ConnectionError("store unavailable")
+        await super().discard(chat_id)
+
+
+async def test_a_store_failure_costs_that_chat_only(fake_bot):
+    store = FlakyStore()
+    store.down = {2}
+    menus = CommandMenus(store=store)
+
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2, 3]))
+
+    assert set(chat_writes(fake_bot)) == {1, 2, 3}
+    assert set(store.data) == {1, 3}
+
+
+async def test_a_menu_the_store_missed_is_retried_next_sync(fake_bot):
+    store = FlakyStore()
+    store.down = {2}
+    menus = CommandMenus(store=store)
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2]))
+    store.down = set()
+    fake_bot.calls.clear()
+
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2]))
+
+    assert set(chat_writes(fake_bot)) == {2}
+    assert set(store.data) == {1, 2}
+
+
+async def test_a_menu_the_store_missed_is_still_cleared_when_its_chat_leaves(fake_bot):
+    store = FlakyStore()
+    store.down = {2}
+    menus = CommandMenus(store=store)
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2]))
+    store.down = set()
+    fake_bot.calls.clear()
+
+    await menus.sync(fake_bot, REGS, scopes(admin=[1]))
+
+    assert deleted_chats(fake_bot) == [2]
+
+
+async def test_a_clear_the_store_missed_is_retried_next_sync(fake_bot):
+    store = FlakyStore()
+    menus = CommandMenus(store=store)
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2]))
+    store.down = {2}
+    await menus.sync(fake_bot, REGS, scopes(admin=[1]))
+    assert set(store.data) == {1, 2}  # Telegram cleared it; the store didn't hear
+
+    store.down = set()
+    fake_bot.calls.clear()
+    await menus.sync(fake_bot, REGS, scopes(admin=[1]))
+
+    assert deleted_chats(fake_bot) == [2]
+    assert set(store.data) == {1}
+
+
+# ------------------------------------------------------------ flood control
+
+
+async def test_flood_control_is_waited_out_not_skipped(fake_bot):
+    from telegram.error import RetryAfter
+
+    fake_bot.fail_once("set_my_commands", RetryAfter(0))  # the default menu
+    fake_bot.fail_once("set_my_commands", RetryAfter(0))  # chat 1, once
+    menus = CommandMenus()
+
+    await menus.sync(fake_bot, REGS, scopes(admin=[1]))
+
+    assert chat_writes(fake_bot) == {1: ["start", "ban"]}
+    assert len(fake_bot.calls_to("set_my_commands")) == 4  # two refused, two landed
+
+
+async def test_persistent_flood_control_gives_up_on_that_chat_only(fake_bot):
+    from telegram.error import RetryAfter
+
+    menus = CommandMenus()
+    for _ in range(3):
+        fake_bot.fail_once("set_my_commands", RetryAfter(0))
+
+    # chat 1 is refused three times and given up on; the sync still completes
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2]), chats=[1, 2])
+
+    fake_bot.calls.clear()
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2]))
+    assert chat_writes(fake_bot) == {1: ["start", "ban"]}  # retried; 2 had landed
+
+
 # ------------------------------------------------- bot.sync_commands()
 
 
-def wire(bot: Bot, fake_bot: FakeBot) -> None:
-    """Wire the handlers and stand a fake application in for the built one."""
-    bot._wire_handlers()
-    bot.application = SimpleNamespace(bot=fake_bot)  # type: ignore[assignment]
-
-
-async def test_sync_commands_republishes_on_demand(fake_bot):
+async def test_sync_commands_republishes_on_demand():
     admins = [1]
     bot = make_bot(scope_chats={"admin": lambda: admins})
 
     @bot.command("ban", scope="admin")
     async def ban(update): ...
 
-    wire(bot, fake_bot)
-    await bot.sync_commands()
-    assert set(chat_writes(fake_bot)) == {1}
+    async with TestClient(bot) as client:
+        await bot.sync_commands()
+        assert chat_ids_written(client) == {1}
 
-    admins.append(2)  # a promotion takes effect without a restart
-    fake_bot.calls.clear()
-    await bot.sync_commands()
-    assert set(chat_writes(fake_bot)) == {2}
+        admins.append(2)  # a promotion takes effect without a restart
+        client.requests.clear()
+        await bot.sync_commands()
+        assert chat_ids_written(client) == {2}
 
 
-async def test_sync_commands_with_chats_touches_only_those(fake_bot):
+async def test_sync_commands_with_chats_touches_only_those():
     bot = make_bot(scope_chats={"admin": [1, 2]})
 
     @bot.command("ban", scope="admin")
     async def ban(update): ...
 
-    wire(bot, fake_bot)
-    await bot.sync_commands(chats=[1])
+    async with TestClient(bot) as client:
+        await bot.sync_commands(chats=[1])
 
-    assert set(chat_writes(fake_bot)) == {1}
-    assert default_writes(fake_bot) == []
+    assert chat_ids_written(client) == {1}
+    assert len(client.calls("setMyCommands")) == 1  # not even the default menu
 
 
 async def test_sync_commands_needs_the_built_application():
@@ -522,13 +661,89 @@ async def test_sync_commands_needs_the_built_application():
         await bot.sync_commands()
 
 
-async def test_known_scope_chats_seeds_the_bot_level_sync(fake_bot):
+async def test_known_scope_chats_seeds_the_bot_level_sync():
     bot = make_bot(scope_chats={"admin": [1]}, known_scope_chats=[1, 7])
 
     @bot.command("ban", scope="admin")
     async def ban(update): ...
 
-    wire(bot, fake_bot)
-    await bot.sync_commands()
+    async with TestClient(bot) as client:
+        await bot.sync_commands()
 
-    assert deleted_chats(fake_bot) == [7]
+    assert [c.params["scope"]["chat_id"] for c in client.calls("deleteMyCommands")] == [7]
+
+
+async def test_the_startup_sync_does_not_hold_up_the_bot():
+    """One API call per scoped chat: at startup it runs in the background."""
+    release = asyncio.Event()
+
+    async def slow_admins():
+        await release.wait()  # a database that takes its time
+        return [1]
+
+    bot = make_bot(scope_chats={"admin": slow_admins})
+
+    @bot.command("ban", scope="admin")
+    async def ban(update): ...
+
+    @bot.command("ping")
+    async def ping():
+        return Screen(text="pong")
+
+    async with TestClient(bot, startup=True) as client:
+        assert sent_texts(await client.send("/ping")) == ["pong"]  # answered already
+        assert client.calls("setMyCommands") == []
+
+        release.set()
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert chat_ids_written(client) == {1}
+
+
+def chat_ids_written(client: TestClient) -> set[int]:
+    return {
+        call.params["scope"]["chat_id"]
+        for call in client.calls("setMyCommands")
+        if call.params.get("scope", {}).get("type") == "chat"
+    }
+
+
+# -------------------------------------------- /help agrees with the menus
+
+
+def vip_bot(**kwargs) -> Bot:
+    async def resolver(update):
+        return {"admin": False}
+
+    bot = make_bot(
+        scope_chats={"vip": [7]},
+        auth=Auth(resolver, name="user", is_admin=lambda u: u["admin"]),
+        **kwargs,
+    )
+
+    @bot.command("perk", description="A VIP perk", scope="vip")
+    async def perk(update): ...
+
+    return bot
+
+
+async def test_help_shows_a_scope_to_the_chats_whose_menu_has_it():
+    """A non-admin VIP sees /perk in their menu -- and so in /help."""
+    async with TestClient(vip_bot(), user_id=7) as client:
+        listing = (await client.send("/help"))[0].text.replace("\\", "")
+        detail = (await client.send("/help perk"))[0].text
+
+    assert "/perk" in listing
+    assert "Unknown command" not in detail
+
+
+async def test_help_hides_a_scope_from_chats_outside_it():
+    async with TestClient(vip_bot(), user_id=8) as client:
+        listing = (await client.send("/help"))[0].text.replace("\\", "")
+
+    assert "/perk" not in listing
+
+
+def test_scope_chats_and_scope_member_are_mutually_exclusive():
+    with pytest.raises(ConfigurationError, match="not both"):
+        make_bot(scope_chats={"vip": [7]}, scope_member=lambda scope, user: True)

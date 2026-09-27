@@ -3,9 +3,10 @@
 Commands carry metadata at registration (``description``, ``scope``,
 ``hidden``). From that the framework derives:
 
-- a ``/help`` screen listing what the *caller* can see (admins see admin
-  commands), with ``hidden=True`` handlers (entry-only, internal) left out,
-  and a ``/help <command>`` detail screen for a single visible command;
+- a ``/help`` screen listing what the *caller* can see -- with
+  ``scope_chats``, exactly the scopes their chat's menu carries -- with
+  ``hidden=True`` handlers left out, and a ``/help <command>`` detail screen
+  for a single visible command;
 - Telegram command menus via :class:`CommandMenus`.
 
 ``setMyCommands`` writes to Telegram and *stays written*: Telegram resolves a
@@ -19,19 +20,27 @@ reconciliation against remote state, not a local computation:
 - a chat no longer named by any scope gets its menu *deleted*, dropping it
   back to the default menu -- otherwise a demoted admin keeps the menu they
   were last given, and goes on missing every command added since;
-- bookkeeping of what was last written lets a re-sync skip chats that are
-  already right, and a recovery seed covers chats a previous process wrote to.
+- a :class:`MenuStore` remembers what each chat was last given, so a re-sync
+  skips chats that are already right; Telegram's flood control is waited out.
+
+The startup sync runs in the background, so a bot with thousands of scoped
+chats starts answering immediately.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import Any
+from datetime import timedelta
+from functools import partial
+from typing import Any, Protocol, runtime_checkable
 
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+from telegram.error import RetryAfter
 
 from .args import ArgSpec, type_label, usage_string
 from .auth import guard_roles, is_admin_only, needs_principal
@@ -45,10 +54,7 @@ logger = logging.getLogger("vitrine.commands")
 #: chats a scope may name: a static list or a (possibly async) callable
 ScopeChats = Callable[[], Any] | Sequence[int]
 
-#: reads the current scope -> chats mapping. :meth:`CommandMenus.sync` takes
-#: the *reader* rather than an already-resolved mapping, because the read is
-#: part of the reconciliation and has to happen under the same lock as the
-#: writes it feeds -- see there.
+#: reads the current scope -> chats mapping; awaited under the sync lock
 ScopeResolver = Callable[[], Awaitable[Mapping[str, Sequence[int]]]]
 
 
@@ -198,13 +204,10 @@ def _bot_commands(regs: Sequence[Registration]) -> list[BotCommand]:
     ]
 
 
-#: what we remember about a published chat menu; equality answers "does the
-#: chat's menu already hold what this sync would write?"
-_Fingerprint = tuple[tuple[str, str], ...]
-
-
-def _fingerprint(commands: Sequence[BotCommand]) -> _Fingerprint:
-    return tuple((c.command, c.description) for c in commands)
+def fingerprint(commands: Sequence[BotCommand]) -> str:
+    """A short digest of a menu: equal digests mean an identical menu."""
+    payload = json.dumps([(c.command, c.description) for c in commands])
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
 def _desired_menus(
@@ -212,15 +215,9 @@ def _desired_menus(
 ) -> tuple[list[BotCommand], dict[int, list[BotCommand]]]:
     """The default menu, and the one merged menu each scoped chat should hold.
 
-    A chat's menu is a function of the *set* of scopes that name it -- a
-    resolver may report the same chat more than once (one backed by a SQL
-    join does this routinely), and multiplicity must not change the menu.
-    Scopes are merged in sorted-name order so the result -- and therefore the
-    fingerprint that decides whether a write can be skipped -- is stable
-    across syncs regardless of dict or listing order.
-
-    Thousands of chats share a handful of distinct scope sets, so each menu is
-    built once per set and shared by every chat that has it.
+    A chat's menu depends on the *set* of scopes naming it (resolvers may list
+    a chat twice), merged in sorted scope order so its fingerprint is stable.
+    Each distinct scope set is built once and shared.
     """
     by_scope: dict[str, list[Registration]] = {}
     for reg in menu_commands(regs):
@@ -235,41 +232,93 @@ def _desired_menus(
     menus: dict[frozenset[str], list[BotCommand]] = {}
     for scopes in chat_scopes.values():
         if scopes not in menus:
-            menus[scopes] = _bot_commands([
-                *default,
-                *(reg for scope in sorted(scopes) for reg in by_scope.get(scope, ())),
-            ])
+            menus[scopes] = _bot_commands(
+                [
+                    *default,
+                    *(reg for scope in sorted(scopes) for reg in by_scope.get(scope, ())),
+                ]
+            )
 
     return _bot_commands(default), {
         chat_id: menus[scopes] for chat_id, scopes in chat_scopes.items()
     }
 
 
+@runtime_checkable
+class MenuStore(Protocol):
+    """Remembers which menu each chat was last given (chat id -> fingerprint).
+
+    The default keeps it in memory, so a restart re-sends every scoped menu
+    once. A persistent store (Redis, a table) skips unchanged chats across
+    restarts *and* remembers which chats hold a menu at all, so a chat that
+    left every scope while the bot was down still gets cleared.
+    """
+
+    async def load(self) -> Mapping[int, str]: ...
+
+    async def set(self, chat_id: int, fingerprint: str) -> None: ...
+
+    async def discard(self, chat_id: int) -> None: ...
+
+
+class InMemoryMenuStore:
+    """Default store; lives for the process lifetime."""
+
+    def __init__(self) -> None:
+        self._data: dict[int, str] = {}
+
+    async def load(self) -> Mapping[int, str]:
+        return dict(self._data)
+
+    async def set(self, chat_id: int, fingerprint: str) -> None:
+        self._data[chat_id] = fingerprint
+
+    async def discard(self, chat_id: int) -> None:
+        self._data.pop(chat_id, None)
+
+
+#: attempts per API call when Telegram answers with RetryAfter (flood control)
+_MAX_ATTEMPTS = 3
+
+
+async def _with_flood_control(call: Callable[[], Awaitable[Any]]) -> Any:
+    """Run one Bot API call, waiting out Telegram's RetryAfter a few times."""
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            return await call()
+        except RetryAfter as exc:
+            if attempt == _MAX_ATTEMPTS:
+                raise
+            delay = exc.retry_after
+            seconds = (
+                delay.total_seconds() if isinstance(delay, timedelta) else float(delay)
+            )
+            logger.info("flood control: retrying menu write in %.1fs", seconds)
+            await asyncio.sleep(seconds)
+    raise AssertionError("unreachable")
+
+
 class CommandMenus:
     """Reconciles Telegram's per-chat command menus with the app's scopes.
 
-    Holds the process's belief about remote state: a fingerprint per chat menu
-    written, plus the ``known_scope_chats`` recovery seed. The seed names chats
-    that *may* carry a menu from an earlier run -- a process has no memory of
-    what a previous one published, so without it an admin demoted while the bot
-    was down keeps their menu forever. It is loaded and consumed by the first
-    **full** sync that *completes*: the first sync happens at startup, exactly
-    when a database-backed seed or ``scope_chats`` resolver is most likely to
-    be down, and a failed sync that ate the seed would orphan every historical
-    chat for the life of the process. Chats whose individual API call fails
-    stay seeded, so the next sync retries them.
+    What was published per chat lives in a :class:`MenuStore`, loaded by the
+    first sync. ``known_scope_chats`` adds chats a previous process *may* have
+    written to -- needed only with a store that doesn't persist -- and is
+    consumed by the first full sync that completes, so a database that is
+    down at startup doesn't cost the seed. A chat whose write fails -- to
+    Telegram or to the store -- stays in line for the next sync; the record
+    only changes once the store has it.
 
-    All syncing runs under one lock, and that lock covers reading the scopes
-    as well as writing them. Serializing only the writes is not enough: two
-    overlapping syncs would each read the world first, and whichever wrote
-    *last* would win with whatever it read *first*, leaving a just-demoted
-    admin holding the menu -- recorded as correct, so later syncs skip it.
-    Hence :meth:`sync` takes a resolver it awaits itself rather than a mapping
-    a caller resolved at some earlier, unknowable moment.
+    All syncing runs under one lock that covers *reading* the scopes as well
+    as writing them: otherwise an older read could be written last and then
+    recorded as correct.
     """
 
-    def __init__(self, known_chats: ScopeChats | None = None) -> None:
-        self._published: dict[int, _Fingerprint] = {}
+    def __init__(
+        self, known_chats: ScopeChats | None = None, store: MenuStore | None = None
+    ) -> None:
+        self.store: MenuStore = store or InMemoryMenuStore()
+        self._published: dict[int, str] | None = None  # loaded from the store
         self._seed_source: ScopeChats | None = known_chats
         self._seed: set[int] = set()
         self._lock = asyncio.Lock()
@@ -283,64 +332,75 @@ class CommandMenus:
     ) -> None:
         """Publish/refresh menus; with ``chats`` given, touch only those chats.
 
-        ``resolve_scopes`` is awaited here, inside the lock, so that what a
-        sync writes is what the world looked like when it took its turn. The
-        lock therefore spans the resolvers' round trips and not just the
-        writes -- deliberate, and the reason a resolver that hangs stalls
-        every other sync rather than only its own caller.
-
-        A full sync republishes the default menu (a single write, not worth
-        tracking), writes every scoped chat whose menu would change, and
-        deletes the menu of every chat that left all scopes. A targeted sync
-        writes or deletes only the listed chats -- nothing else written,
-        nothing else cleared, not even the default menu -- so it stays safe
-        when a ``scope_chats`` resolver is misbehaving.
-
-        A failed write for one chat is logged and leaves that chat's
-        bookkeeping untouched, so the next sync retries it.
+        A full sync republishes the default menu, writes every scoped chat
+        whose menu would change, and deletes the menu of every chat that left
+        all scopes. A targeted sync writes or deletes only the listed chats.
         """
         async with self._lock:
+            if self._published is None:
+                self._published = dict(await self.store.load())
+            published = self._published
+
             default, desired = _desired_menus(regs, await resolve_scopes())
             if chats is None:
                 if self._seed_source is not None:
                     self._seed |= set(await resolve_chats(self._seed_source))
                 writes = set(desired)
-                deletes = (set(self._published) | self._seed) - writes
-                await tg_bot.set_my_commands(default, scope=BotCommandScopeDefault())
-                # The seed source is consumed only now, with the default menu
-                # written and the resolvers proven reachable: this sync will
-                # run its per-chat loops, i.e. it "completes".
-                self._seed_source = None
+                deletes = (set(published) | self._seed) - writes
+                await _with_flood_control(
+                    partial(tg_bot.set_my_commands, default, scope=BotCommandScopeDefault())
+                )
+                self._seed_source = None  # consumed: this sync will complete
             else:
                 listed = set(chats)
                 writes = set(desired) & listed
-                # Unconditional for listed chats: records can't distinguish
-                # "never written" from "written by a previous process", and
-                # clearing a chat with no menu is a no-op.
+                # clearing a chat with no menu is a no-op, and the record can't
+                # tell "never written" from "written by an earlier process"
                 deletes = listed - set(desired)
 
             for chat_id in sorted(writes):
-                fingerprint = _fingerprint(desired[chat_id])
-                if self._published.get(chat_id) == fingerprint:
+                digest = fingerprint(desired[chat_id])
+                if published.get(chat_id) == digest:
                     self._seed.discard(chat_id)
                     continue
                 try:
-                    await tg_bot.set_my_commands(
-                        desired[chat_id], scope=BotCommandScopeChat(chat_id=chat_id)
+                    await _with_flood_control(
+                        partial(
+                            tg_bot.set_my_commands,
+                            desired[chat_id],
+                            scope=BotCommandScopeChat(chat_id=chat_id),
+                        )
                     )
                 except Exception as exc:  # noqa: BLE001 - one bad chat id
                     logger.warning("could not set commands for chat %s: %s", chat_id, exc)
+                    continue
+                try:
+                    await self.store.set(chat_id, digest)
+                except Exception as exc:  # noqa: BLE001
+                    # it holds a menu the store doesn't know of: rewrite or clear
+                    # it next sync, whichever it needs then
+                    logger.warning("could not record the menu of chat %s: %s", chat_id, exc)
+                    self._seed.add(chat_id)
                 else:
-                    self._published[chat_id] = fingerprint
+                    published[chat_id] = digest
                     self._seed.discard(chat_id)
 
             for chat_id in sorted(deletes):
                 try:
-                    await tg_bot.delete_my_commands(
-                        scope=BotCommandScopeChat(chat_id=chat_id)
+                    await _with_flood_control(
+                        partial(
+                            tg_bot.delete_my_commands,
+                            scope=BotCommandScopeChat(chat_id=chat_id),
+                        )
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("could not clear commands for chat %s: %s", chat_id, exc)
+                    continue
+                try:
+                    await self.store.discard(chat_id)
+                except Exception as exc:  # noqa: BLE001
+                    # still on record, so the next full sync clears it again
+                    logger.warning("could not forget the menu of chat %s: %s", chat_id, exc)
                 else:
-                    self._published.pop(chat_id, None)
+                    published.pop(chat_id, None)
                     self._seed.discard(chat_id)

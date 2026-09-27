@@ -19,8 +19,9 @@ framework owns *resolve once per update, cache, inject, guard*::
 
 Any handler that declares a ``user`` parameter receives the resolved principal;
 guards (:func:`requires`, :func:`admin_only`, :func:`requires_principal`) read
-from the same object; bans
-are enforced bot-wide before any handler runs.
+from the same object; bans are enforced bot-wide before any handler runs. The
+principal is resolved in the update's dependency scope, so providers it was
+loaded with (a database session, say) stay open until the update is done.
 """
 
 from __future__ import annotations
@@ -29,15 +30,13 @@ from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, Generic, TypeVar
 
 from .exceptions import BannedError, NotAuthorizedError, NotRegisteredError
-from .injection import Invocation, Providers, resolve_kwargs
+from .injection import _MISSING, Invocation, Providers, all_or_nothing, resolve_kwargs
 
 P = TypeVar("P")
 
 _ROLES_ATTR = "__vitrine_required_roles__"
 _ADMIN_ATTR = "__vitrine_admin_only__"
 _PRINCIPAL_ATTR = "__vitrine_requires_principal__"
-
-_CACHE_ATTR = "__vitrine_principal__"
 
 
 class Auth(Generic[P]):
@@ -59,23 +58,16 @@ class Auth(Generic[P]):
         self._is_admin = is_admin
 
     async def resolve(self, inv: Invocation, providers: Providers) -> P | None:
-        """Resolve the caller once per update; later calls hit the cache."""
-        context = inv.context
-        if context is not None:
-            cached = getattr(context, _CACHE_ATTR, None)
-            if cached is not None:
-                update_id, principal = cached
-                if update_id == id(inv.update):
-                    return principal
+        """Resolve the caller once per dependency scope, i.e. once per update."""
+        if inv.scope.principal is not _MISSING:
+            return inv.scope.principal
 
-        kwargs = await resolve_kwargs(self.resolver, inv, providers)
-        principal = await self.resolver(**kwargs)
-
-        if context is not None:
-            try:
-                setattr(context, _CACHE_ATTR, (id(inv.update), principal))
-            except AttributeError:
-                pass  # exotic context type without attribute support
+        # a failed lookup leaves nothing behind: whatever resolves the principal
+        # next (a handler after the ban gate) starts with fresh providers
+        async with all_or_nothing(inv):
+            kwargs = await resolve_kwargs(self.resolver, inv, providers)
+            principal = await self.resolver(**kwargs)
+        inv.scope.principal = principal
 
         return principal
 

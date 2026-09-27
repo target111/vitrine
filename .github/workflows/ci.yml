@@ -18,13 +18,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
-      - run: uv run ruff check src tests
+      - run: uv run ruff check src tests examples
       - run: uv run pytest -q
 
   # The locked legs never see a python-telegram-bot release until someone bumps
-  # the lockfile. Conversation.end_run drives PTB internals that carry no
-  # version guarantee, so run the suite against the newest PTB to find out
-  # early. Advisory: a broken upstream release must not red-flag a PR.
+  # the lockfile. vitrine subclasses Application and BaseHandler and the test
+  # client fakes PTB's request layer, so run the suite against the newest PTB
+  # to find out early. Advisory: a broken upstream release must not red-flag a PR.
   ptb-latest:
     runs-on: ubuntu-latest
     continue-on-error: true

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 import pytest
 from conftest import make_dispatch
 
-from vitrine import Bot, Depends
+from vitrine import Arg, Bot, Depends
 from vitrine.exceptions import ConfigurationError
 from vitrine.injection import Providers, annotation_conflicts
 from vitrine.routing import Registration
@@ -153,7 +153,7 @@ def test_reserved_names_and_command_args_are_not_linted(fake_bot):
     by the framework; they are none of the lint's business."""
     dispatch = make_dispatch(fake_bot)
 
-    async def pay(update, amount: float): ...
+    async def pay(update, amount: Arg[float]): ...
 
     reg = Registration(kind="command", fn=pay, name="pay", command="pay")
     dispatch.validate(reg)  # no ConfigurationError, nothing to report
@@ -181,7 +181,7 @@ def test_strict_types_turns_the_warning_into_a_build_failure():
     async def handler(update, count: int): ...
 
     with pytest.raises(ConfigurationError, match="count"):
-        bot._wire_handlers()
+        bot.build()
 
 
 def test_without_strict_types_the_app_still_builds():
@@ -191,4 +191,4 @@ def test_without_strict_types_the_app_still_builds():
     @bot.message()
     async def handler(update, count: int): ...
 
-    bot._wire_handlers()  # warning only
+    bot.build()  # warning only

@@ -1,19 +1,28 @@
-"""Conversation state machine: per-run state, transitions, exits, timeouts."""
+"""Conversations end to end: runs, transitions, exits, timeouts, exclusivity."""
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 import pytest
-from conftest import FakeBot, FakeQuery, make_context, make_dispatch, make_update
-from telegram.ext import CommandHandler, ConversationHandler, MessageHandler
+from telegram.ext import filters
 
-from vitrine.callbacks import CallbackData
-from vitrine.conversations import ANY_STATE, END, Conversation, ExitReason
+from vitrine import (
+    ANY_STATE,
+    CANCEL,
+    END,
+    Arg,
+    Auth,
+    Bot,
+    CallbackData,
+    Conversation,
+    ExitReason,
+    Screen,
+    admin_only,
+)
 from vitrine.exceptions import ConfigurationError
-from vitrine.injection import Providers
-from vitrine.screens import Screen
+from vitrine.testing import TestClient, sent_texts
 
 
 @dataclass
@@ -23,12 +32,27 @@ class OrderState:
     log: list = field(default_factory=list)
 
 
-def build_conv(providers: Providers | None = None):
+class StopCB(CallbackData, prefix="t_conv_stop"):
+    pass
+
+
+class SplitCB(CallbackData, prefix="t_split"):
+    kind: str
+
+
+def make_bot(*convs: Conversation, **kwargs) -> Bot:
+    bot = Bot(token="123:TEST", help_command=False, **kwargs)
+    for conv in convs:
+        bot.conversation(conv)
+    return bot
+
+
+def build_conv(*, timeout: float | None = 60):
     exits: list[tuple[OrderState, ExitReason]] = []
-    conv = Conversation("order", OrderState, timeout=60)
+    conv = Conversation("order", OrderState, timeout=timeout)
 
     @conv.entry(command="order")
-    async def start(state: OrderState, update):
+    async def start(state: OrderState):
         return "item", Screen(text="what?")
 
     @conv.state("item")
@@ -42,8 +66,8 @@ def build_conv(providers: Providers | None = None):
         return END, Screen(text="done")
 
     @conv.cancel()
-    async def cancelled(state: OrderState, update):
-        return None
+    async def cancelled(state: OrderState):
+        return Screen(text="cancelled")
 
     @conv.on_exit
     async def on_exit(state: OrderState, reason: ExitReason):
@@ -52,186 +76,346 @@ def build_conv(providers: Providers | None = None):
     return conv, exits
 
 
-def get_callbacks(handler):
-    entry = handler.entry_points[0].callback
-    states = {name: hs[0].callback for name, hs in handler.states.items()}
-    fallback = handler.fallbacks[0].callback
-    return entry, states, fallback
+def live(conv: Conversation, chat: int = 42, user: int = 42):
+    return conv.active(chat_id=chat, user_id=user)
 
 
-async def test_full_run_transitions_and_finishes(fake_bot: FakeBot):
+# ------------------------------------------------------------------ the basics
+
+
+async def test_full_run_transitions_and_finishes():
     conv, exits = build_conv()
-    dispatch = make_dispatch(fake_bot)
-    handler = conv.build(dispatch, [])
-    entry, states, _ = get_callbacks(handler)
-    context = make_context(fake_bot)
-
-    assert await entry(make_update(text="/order"), context) == "item"
-    assert await states["item"](make_update(text="widget"), context) == "qty"
-    result = await states["qty"](make_update(text="3"), context)
-    assert result == ConversationHandler.END
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/order")
+        assert live(conv)[0] == "item"
+        await client.send("widget")
+        await client.send("3")
 
     ((state, reason),) = exits
     assert reason is ExitReason.FINISHED
     assert state.item == "widget" and state.qty == 3
-    # each step's screen was delivered
-    texts = [c["text"] for c in fake_bot.calls_to("send_message")]
-    assert texts == ["what?", "how many?", "done"]
+    assert client.texts() == ["what?", "how many?", "done"]
+    assert live(conv) is None
 
 
-async def test_state_object_created_fresh_per_run(fake_bot: FakeBot):
+async def test_state_object_created_fresh_per_run():
     conv, _ = build_conv()
-    dispatch = make_dispatch(fake_bot)
-    entry, states, _ = get_callbacks(conv.build(dispatch, []))
-    context = make_context(fake_bot)
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/order")
+        await client.send("first")
+        await client.send("/cancel")
+        await client.send("/order")
+        await client.send("second")
 
-    await entry(make_update(text="/order"), context)
-    await states["item"](make_update(text="first"), context)
-    await entry(make_update(text="/order"), context)  # restart
-    result = await states["item"](make_update(text="second"), context)
-    assert result == "qty"
-
-    key = [k for k in context.chat_data if k.startswith("__vitrine_conv:order")][0]
-    assert context.chat_data[key].item == "second"
+        assert live(conv) == ("qty", OrderState(item="second"))
 
 
-def test_per_chat_false_state_follows_user_across_chats():
+async def test_a_run_lives_in_its_chat_by_default():
+    conv, _ = build_conv()
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/order", chat_id=-100)
+        assert live(conv, chat=-100) is not None
+        assert live(conv, chat=42) is None
+
+
+async def test_per_chat_false_follows_the_user_across_chats():
     conv = Conversation("t_follow", OrderState, per_chat=False)
-    user_data: dict = {}
-    ctx_a = SimpleNamespace(chat_data={}, user_data=user_data)
-    ctx_b = SimpleNamespace(chat_data={}, user_data=user_data)
 
-    state = OrderState(item="widget")
-    conv._set_state(make_update(user_id=7, chat_id=1), ctx_a, state)
-    assert conv._get_state(make_update(user_id=7, chat_id=2), ctx_b) is state
-    assert not ctx_a.chat_data  # stored on the user, not the chat
+    @conv.entry(command="follow")
+    async def start():
+        return "item"
+
+    @conv.state("item")
+    async def got(state: OrderState, update):
+        state.item = update.effective_message.text
+        return END
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/follow", chat_id=-100)
+        await client.send("from elsewhere", chat_id=-200)
+
+    assert conv.active(user_id=42) is None  # finished in the other chat
 
 
-def test_per_chat_state_stays_on_the_chat():
-    conv = Conversation("t_stay", OrderState)  # per_chat=True is the default
-    ctx = SimpleNamespace(chat_data={}, user_data={})
-    conv._set_state(make_update(user_id=7, chat_id=1), ctx, OrderState())
-    assert ctx.chat_data and not ctx.user_data
+def test_per_chat_and_per_user_cannot_both_be_off():
+    with pytest.raises(ConfigurationError, match="both"):
+        Conversation("t_nobody", per_chat=False, per_user=False)
 
 
-async def test_cancel_runs_exit_hook_with_cancelled(fake_bot: FakeBot):
+async def test_cancel_runs_exit_hook_with_cancelled():
     conv, exits = build_conv()
-    dispatch = make_dispatch(fake_bot)
-    entry, _, fallback = get_callbacks(conv.build(dispatch, []))
-    context = make_context(fake_bot)
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/order")
+        assert sent_texts(await client.send("/cancel")) == ["cancelled"]
 
-    await entry(make_update(text="/order"), context)
-    result = await fallback(make_update(text="/cancel"), context)
-    assert result == ConversationHandler.END
     assert exits[0][1] is ExitReason.CANCELLED
+    assert live(conv) is None
 
 
-async def test_timeout_runs_exit_hook_with_timeout(fake_bot: FakeBot):
-    conv, exits = build_conv()
-    dispatch = make_dispatch(fake_bot)
-    handler = conv.build(dispatch, [])
-    entry, states, _ = get_callbacks(handler)
-    context = make_context(fake_bot)
+async def test_a_step_can_cancel_by_returning_cancel():
+    """A Cancel *button* reports CANCELLED too, not FINISHED."""
+    exits: list[ExitReason] = []
+    conv = Conversation("t_cancel_btn", OrderState)
 
-    await entry(make_update(text="/order"), context)
-    timeout_cb = handler.states[ConversationHandler.TIMEOUT][0].callback
-    await timeout_cb(make_update(text="anything"), context)
+    @conv.entry(command="go")
+    async def start():
+        return "item", Screen(text="pick")
 
-    assert exits[0][1] is ExitReason.TIMEOUT
-    assert not [k for k in context.chat_data if context.chat_data.get(k)]  # state cleared
+    @conv.state("item")
+    async def item(): ...
+
+    @conv.state(ANY_STATE, callback=StopCB)
+    async def stop():
+        return CANCEL, Screen(text="stopped")
+
+    @conv.on_exit
+    async def on_exit(reason):
+        exits.append(reason)
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/go")
+        await client.press(StopCB())
+
+    assert exits == [ExitReason.CANCELLED]
 
 
-async def test_unknown_state_is_a_configuration_error(fake_bot: FakeBot):
+# -------------------------------------------------------------------- timeouts
+
+
+async def test_timeout_runs_exit_hook_with_timeout():
+    conv, exits = build_conv(timeout=0.02)
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/order")
+        await asyncio.sleep(0.1)
+
+        assert [reason for _, reason in exits] == [ExitReason.TIMEOUT]
+        assert live(conv) is None
+
+
+async def test_activity_resets_the_timeout():
+    conv, exits = build_conv(timeout=0.4)
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/order")
+        await asyncio.sleep(0.25)
+        await client.send("widget")  # resets the clock
+        await asyncio.sleep(0.25)
+        assert exits == [] and live(conv)[0] == "qty"
+
+
+async def test_an_exit_hook_can_say_goodbye_on_timeout():
+    conv = Conversation("t_bye", timeout=0.02)
+
+    @conv.entry(command="bye")
+    async def start():
+        return "s"
+
+    @conv.state("s")
+    async def s(): ...
+
+    @conv.on_exit
+    async def on_exit(reason):
+        if reason is ExitReason.TIMEOUT:
+            return Screen(text="timed out")
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/bye")
+        await asyncio.sleep(0.1)
+
+    assert client.texts() == ["timed out"]
+
+
+async def test_stopping_the_bot_cancels_pending_timeouts():
+    conv, exits = build_conv(timeout=0.05)
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/order")
+    await asyncio.sleep(0.1)
+
+    assert exits == []
+
+
+# ---------------------------------------------------- errors stay in the pipeline
+
+
+async def test_an_unknown_state_gets_error_ux_and_the_run_stays_put():
     conv = Conversation("bad", OrderState)
 
     @conv.entry(command="bad")
-    async def start(state, update):
-        return "no-such-state"
+    async def start():
+        return "real"
 
     @conv.state("real")
-    async def real(state, update):
+    async def real():
+        return "no-such-state"
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/bad")
+        calls = await client.send("anything")
+
+        assert "went wrong" in sent_texts(calls)[0]
+        assert live(conv)[0] == "real"
+
+
+async def test_a_failing_step_keeps_the_run_in_its_state():
+    conv = Conversation("t_boom", OrderState)
+
+    @conv.entry(command="boom")
+    async def start():
+        return "s"
+
+    @conv.state("s")
+    async def s():
+        raise RuntimeError("kaboom")
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/boom")
+        calls = await client.send("x")
+
+        assert "kaboom" not in sent_texts(calls)[0]
+        assert live(conv)[0] == "s"
+
+
+async def test_a_failing_exit_hook_still_ends_the_run():
+    conv = Conversation("t_hookboom")
+
+    @conv.entry(command="hb")
+    async def start():
+        return "s"
+
+    @conv.state("s")
+    async def s():
         return END
 
-    dispatch = make_dispatch(fake_bot)
-    entry = conv.build(dispatch, []).entry_points[0].callback
+    @conv.on_exit
+    async def on_exit():
+        raise RuntimeError("hook")
 
-    with pytest.raises(ConfigurationError, match="no-such-state"):
-        await entry(make_update(text="/bad"), make_context(fake_bot))
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/hb")
+        calls = await client.send("x")
+
+    assert "went wrong" in sent_texts(calls)[0]
+    assert live(conv) is None
 
 
-async def test_exit_hook_gets_injected_services(fake_bot: FakeBot):
+# ----------------------------------------------------- injection and middleware
+
+
+async def test_exit_hook_gets_injected_services():
     seen = []
-    providers = Providers()
-    providers.register_value("order_service", {"name": "svc"})
-
     conv = Conversation("inj", OrderState)
 
     @conv.entry(command="inj")
-    async def start(state, update):
+    async def start():
         return END
 
     @conv.state("noop")
-    async def noop(state, update):
-        return END
+    async def noop(): ...
 
     @conv.on_exit
     async def hook(state, reason, order_service):
         seen.append((reason, order_service))
 
-    dispatch = make_dispatch(fake_bot, providers=providers)
-    entry = conv.build(dispatch, []).entry_points[0].callback
+    bot = make_bot(conv)
+    bot.provide_value("order_service", {"name": "svc"})
+    async with TestClient(bot) as client:
+        await client.send("/inj")
 
-    await entry(make_update(text="/inj"), make_context(fake_bot))
     assert seen == [(ExitReason.FINISHED, {"name": "svc"})]
 
 
-async def test_conversation_steps_go_through_middleware(fake_bot: FakeBot):
+async def test_steps_and_exit_hooks_go_through_middleware():
     order: list[str] = []
+    conv, _ = build_conv()
+    bot = make_bot(conv)
 
+    @bot.middleware
     async def mw(event, call_next):
-        order.append(f"mw:{event.handler_name}")
+        order.append(event.handler_name)
         return await call_next(event)
 
-    conv, _ = build_conv()
-    dispatch = make_dispatch(fake_bot)
-    entry, states, _ = get_callbacks(conv.build(dispatch, [mw]))
-    context = make_context(fake_bot)
+    async with TestClient(bot) as client:
+        await client.send("/order")
+        await client.send("w")
+        await client.send("/cancel")
 
-    await entry(make_update(text="/order"), context)
-    await states["item"](make_update(text="w"), context)
+    assert order == ["order.start", "order.got_item", "order.cancelled", "order.on_exit"]
 
-    assert order == ["mw:order.start", "mw:order.got_item"]
+
+async def test_a_middleware_that_answers_itself_moves_no_run():
+    """Its return value isn't a step result: no run starts, no state changes."""
+    closed = False
+    conv = Conversation("t_gate")
+
+    @conv.entry(command="gate")
+    async def start():
+        return "ask", Screen(text="ask?")
+
+    @conv.state("ask")
+    async def ask(update):
+        return END, Screen(text=f"got {update.effective_message.text}")
+
+    bot = make_bot(conv)
+
+    @bot.middleware
+    async def maintenance(event, call_next):
+        if closed:
+            return False
+        return await call_next(event)
+
+    async with TestClient(bot) as client:
+        closed = True
+        await client.send("/gate")
+        assert conv.active(chat_id=client.chat_id, user_id=client.user_id) is None
+
+        closed = False
+        await client.send("/gate")
+        closed = True
+        await client.send("first")  # swallowed: the run stays in "ask"
+        closed = False
+        assert sent_texts(await client.send("second")) == ["got second"]
+
+
+async def test_a_step_sees_what_its_ptb_handler_collects():
+    """context.matches for a Regex filter, as a plain MessageHandler would get."""
+    conv = Conversation("t_regex")
+
+    @conv.entry(command="rx")
+    async def start():
+        return "code"
+
+    @conv.state("code", filters=filters.Regex(r"^(\d{4})$"))
+    async def code(context):
+        return END, Screen(text=f"code {context.matches[0].group(1)}")
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/rx")
+        assert sent_texts(await client.send("1234")) == ["code 1234"]
 
 
 # --------------------------------------------------------- entry discoverability
-
-
-class StopCB(CallbackData, prefix="t_conv_stop"):
-    pass
 
 
 def build_menu_conv() -> Conversation:
     conv = Conversation("t_menu", OrderState)
 
     @conv.entry(command="order", description="Place an order", scope="admin")
-    async def start(state, update):
+    async def start():
         return "item"
 
     @conv.entry(callback=StopCB)
-    async def start_from_button(state, update):
+    async def start_from_button():
         return "item"
 
     @conv.state("item", command="skip")
-    async def skipped(state, update):
-        return END
+    async def skipped():
+        return END, Screen(text="skipped")
 
     @conv.state("item")
-    async def got_item(state, update):
+    async def got_item():
         return END
 
     @conv.cancel()
-    async def cancelled(state, update):
-        return None
+    async def cancelled(): ...
 
     return conv
 
@@ -249,135 +433,144 @@ def test_an_entry_description_falls_back_to_the_docstring():
     conv = Conversation("t_doc", OrderState)
 
     @conv.entry(command="order")
-    async def start(state, update):
+    async def start():
         """
         Place an order.
 
         The rest of the docstring is not the description.
         """
 
-    @conv.state("item")
-    async def got_item(state, update): ...
-
     assert conv.command_registrations()[0].description == "Place an order."
 
 
 def test_a_blank_docstring_leaves_the_description_empty():
-    """A docstring of only whitespace has no summary line -- and must not raise."""
     conv = Conversation("t_blankdoc", OrderState)
 
     @conv.entry(command="order")
-    async def start(state, update):
+    async def start():
         """ """
-
-    @conv.state("item")
-    async def got_item(state, update): ...
 
     assert conv.command_registrations()[0].description == ""
 
 
 def test_in_run_commands_are_not_discoverable():
-    """/skip and /cancel do nothing outside a live run, so they stay unlisted."""
     commands = {reg.command for reg in build_menu_conv().command_registrations()}
 
     assert "skip" not in commands and "cancel" not in commands
 
 
-async def test_a_state_command_is_a_step_of_that_state(fake_bot: FakeBot):
-    handler = build_menu_conv().build(make_dispatch(fake_bot), [])
+async def test_a_state_command_works_only_in_its_state():
+    bot = make_bot(build_menu_conv())
 
-    kinds = [type(h) for h in handler.states["item"]]
-    assert CommandHandler in kinds  # /skip
-    assert MessageHandler in kinds  # the typed answer
+    @bot.command("skip")
+    async def outside():
+        return Screen(text="nothing to skip")
 
-    skip = handler.states["item"][0].callback
-    assert await skip(make_update(text="/skip"), make_context(fake_bot)) == END
+    async with TestClient(bot) as client:
+        assert sent_texts(await client.send("/skip")) == ["nothing to skip"]
+        await client.send("/order")
+        assert sent_texts(await client.send("/skip")) == ["skipped"]
+
+
+def test_a_step_registration_states_its_transport():
+    conv = Conversation("t_kind", OrderState)
+
+    @conv.entry(command="order")
+    async def start(): ...
+
+    @conv.state("qty", command="skip")
+    async def skip(): ...
+
+    @conv.state("qty", callback=StopCB)
+    async def stop(): ...
+
+    @conv.state("qty")
+    async def qty(): ...
+
+    regs = {step.fn.__name__: step.registration(conv.name) for step in conv._steps}
+    assert regs["start"].kind == "command" and regs["skip"].kind == "command"
+    assert regs["stop"].kind == "callback"
+    assert regs["qty"].kind == "message"
 
 
 # ------------------------------------------------------------ multi-state steps
 
 
-def build_wildcard_conv(fake_bot: FakeBot):
+async def test_a_wildcard_step_is_mounted_on_every_state():
     exits: list[ExitReason] = []
     conv = Conversation("t_wild", OrderState)
 
     @conv.entry(command="wild")
-    async def start(state, update):
-        return "item"
+    async def start():
+        return "item", Screen(text="item?")
 
     @conv.state("item")
-    async def got_item(state, update):
+    async def got_item():
         return "qty"
 
     @conv.state("qty")
-    async def got_qty(state, update):
+    async def got_qty():
         return END
 
     @conv.state(ANY_STATE, callback=StopCB)
-    async def stop(state, update):
+    async def stop():
         return END
 
     @conv.on_exit
-    async def on_exit(state, reason):
+    async def on_exit(reason):
         exits.append(reason)
 
-    return conv, exits
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/wild")
+        await client.send("thing")  # now in "qty"
+        await client.press(StopCB())
 
-
-async def test_a_wildcard_step_is_mounted_on_every_state(fake_bot: FakeBot):
-    conv, exits = build_wildcard_conv(fake_bot)
-    handler = conv.build(make_dispatch(fake_bot), [])
-
-    assert len(handler.states["item"]) == 2  # the answer plus the stop button
-    assert len(handler.states["qty"]) == 2
-
-    context = make_context(fake_bot)
-    stop_from_qty = handler.states["qty"][1].callback
-    await handler.entry_points[0].callback(make_update(text="/wild"), context)
-    result = await stop_from_qty(
-        make_update(query=FakeQuery(data=StopCB().pack())), context
-    )
-
-    assert result == END
     assert exits == [ExitReason.FINISHED]
 
 
-async def test_several_states_can_be_named_explicitly(fake_bot: FakeBot):
+async def test_several_states_can_be_named_explicitly():
+    hits: list[str] = []
     conv = Conversation("t_pair", OrderState)
 
     @conv.entry(command="pair")
-    async def start(state, update):
-        return "a"
+    async def start():
+        return "a", Screen(text="a")
 
     @conv.state("a")
-    async def a(state, update):
+    async def a():
         return "b"
 
     @conv.state("b")
-    async def b(state, update):
+    async def b():
         return END
 
     @conv.state("a", "b", callback=StopCB)
-    async def stop(state, update):
-        return END
+    async def stop(state: OrderState):
+        hits.append("stop")
+        return None
 
-    handler = conv.build(make_dispatch(fake_bot), [])
-    assert len(handler.states["a"]) == 2 and len(handler.states["b"]) == 2
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/pair")
+        await client.press(StopCB())
+        await client.send("next")
+        await client.press(StopCB())
+
+    assert hits == ["stop", "stop"]
 
 
-def test_a_wildcard_without_any_state_is_a_configuration_error(fake_bot: FakeBot):
+def test_a_wildcard_without_any_state_is_a_configuration_error():
     conv = Conversation("t_empty", OrderState)
 
     @conv.entry(command="empty")
-    async def start(state, update):
+    async def start():
         return END
 
     @conv.state(ANY_STATE, callback=StopCB)
-    async def stop(state, update):
+    async def stop():
         return END
 
     with pytest.raises(ConfigurationError, match="every state"):
-        conv.build(make_dispatch(fake_bot), [])
+        make_bot(conv).build()
 
 
 def test_a_state_needs_a_name():
@@ -386,65 +579,77 @@ def test_a_state_needs_a_name():
     with pytest.raises(ConfigurationError, match="at least one name"):
 
         @conv.state()
-        async def nowhere(state, update): ...
+        async def nowhere(): ...
+
+
+def test_a_conversation_needs_an_entry():
+    conv = Conversation("t_noentry")
+
+    @conv.state("s")
+    async def s(): ...
+
+    with pytest.raises(ConfigurationError, match="no entry points"):
+        make_bot(conv).build()
 
 
 # --------------------------------------------------------- build-time validation
 
 
-def test_a_step_with_an_unknown_param_fails_at_build(fake_bot: FakeBot):
+def test_a_step_with_an_unknown_param_fails_at_build():
     conv = Conversation("t_badstep", OrderState)
 
     @conv.entry(command="badstep")
-    async def start(state, update):
+    async def start():
         return "item"
 
     @conv.state("item")
-    async def got_item(state, update, mystery_service): ...
+    async def got_item(state, mystery_service): ...
 
     with pytest.raises(ConfigurationError, match="mystery_service"):
-        conv.build(make_dispatch(fake_bot), [])
+        make_bot(conv).build()
 
 
-def test_an_exit_hook_with_an_unknown_param_fails_at_build(fake_bot: FakeBot):
+def test_an_exit_hook_with_an_unknown_param_fails_at_build():
     conv = Conversation("t_badhook", OrderState)
 
     @conv.entry(command="badhook")
-    async def start(state, update):
+    async def start():
         return "item"
 
     @conv.state("item")
-    async def got_item(state, update):
+    async def got_item():
         return END
 
     @conv.on_exit
     async def hook(state, reason, mystery_service): ...
 
     with pytest.raises(ConfigurationError, match="mystery_service"):
-        conv.build(make_dispatch(fake_bot), [])
+        make_bot(conv).build()
+
+
+def test_a_built_conversation_is_frozen():
+    conv, _ = build_conv()
+    make_bot(conv).build()
+
+    with pytest.raises(ConfigurationError, match="already built"):
+
+        @conv.state("item")
+        async def late(): ...
 
 
 # -------------------------------------------------------------------- exclusivity
 
 
-class FakeJob:
-    def __init__(self) -> None:
-        self.removed = False
-
-    def schedule_removal(self) -> None:
-        self.removed = True
-
-
-def build_exclusive(name: str, *, exclusive: bool = True):
+def build_exclusive(name: str, *, exclusive: bool = True, timeout: float | None = 60):
     exits: list[ExitReason] = []
-    conv = Conversation(name, OrderState, timeout=60, exclusive=exclusive)
+    conv = Conversation(name, OrderState, timeout=timeout, exclusive=exclusive)
 
     @conv.entry(command=name)
-    async def start(state, update):
+    async def start():
         return "item"
 
     @conv.state("item")
-    async def got_item(state, update):
+    async def got_item():
         return END
 
     @conv.on_exit
@@ -454,82 +659,41 @@ def build_exclusive(name: str, *, exclusive: bool = True):
     return conv, exits
 
 
-def start_ptb_run(handler, update, state: str = "item") -> tuple:
-    """What PTB records after an entry point returns a state."""
-    key = handler._get_key(update)
-    handler._conversations[key] = state
-    return key
-
-
-async def test_entering_an_exclusive_run_ends_the_other_one(fake_bot: FakeBot):
-    dispatch = make_dispatch(fake_bot)
-    first, first_exits = build_exclusive("t_first")
+async def test_entering_an_exclusive_run_ends_the_other_one():
+    first, first_exits = build_exclusive("t_first", timeout=0.05)
     second, _ = build_exclusive("t_second")
-    handler_a = first.build(dispatch, [])
-    handler_b = second.build(dispatch, [])
-    first.link_peers([first, second])
-    second.link_peers([first, second])
 
-    context = make_context(fake_bot)
-    update = make_update(text="/t_first")
-    await handler_a.entry_points[0].callback(update, context)
-    key = start_ptb_run(handler_a, update)
-    job = FakeJob()
-    handler_a.timeout_jobs[key] = job
+    async with TestClient(make_bot(first, second)) as client:
+        await client.send("/t_first")
+        await client.send("/t_second")
 
-    await handler_b.entry_points[0].callback(make_update(text="/t_second"), context)
-
-    assert first_exits == [ExitReason.CANCELLED]
-    assert key not in handler_a._conversations  # PTB no longer routes to it
-    assert job.removed  # ...and its timeout can't fire a stale notice
-    assert first._get_state(update, context) is None
+        assert first_exits == [ExitReason.CANCELLED]
+        assert live(first) is None and live(second) is not None
+        await asyncio.sleep(0.1)  # the ended run's timer can't fire a stale TIMEOUT
+        assert first_exits == [ExitReason.CANCELLED]
 
 
-async def test_a_non_exclusive_run_is_left_alone(fake_bot: FakeBot):
-    dispatch = make_dispatch(fake_bot)
+async def test_a_non_exclusive_run_is_left_alone():
     quiet, quiet_exits = build_exclusive("t_quiet", exclusive=False)
     loud, _ = build_exclusive("t_loud")
-    handler_a = quiet.build(dispatch, [])
-    handler_b = loud.build(dispatch, [])
-    loud.link_peers([loud])  # only exclusive conversations are peers
 
-    context = make_context(fake_bot)
-    update = make_update(text="/t_quiet")
-    await handler_a.entry_points[0].callback(update, context)
-    key = start_ptb_run(handler_a, update)
+    async with TestClient(make_bot(quiet, loud)) as client:
+        await client.send("/t_quiet")
+        await client.send("/t_loud")
 
-    await handler_b.entry_points[0].callback(make_update(text="/t_loud"), context)
-
-    assert quiet_exits == []
-    assert key in handler_a._conversations
+        assert quiet_exits == []
+        assert live(quiet) is not None
 
 
-def test_exclusive_needs_the_ptb_internals_it_drives(fake_bot: FakeBot, monkeypatch):
-    """If PTB moves what end_run reaches for, the build says so, not an update."""
-    conv, _ = build_exclusive("t_guard")
-    monkeypatch.delattr(ConversationHandler, "_get_key")
+async def test_other_callers_runs_are_left_alone():
+    first, first_exits = build_exclusive("t_mine")
+    second, _ = build_exclusive("t_yours")
 
-    with pytest.raises(ConfigurationError, match="_get_key"):
-        conv.build(make_dispatch(fake_bot), [])
+    async with TestClient(make_bot(first, second)) as client:
+        await client.send("/t_mine")
+        await client.send("/t_yours", user_id=7, chat_id=7)
 
-
-def test_a_non_exclusive_conversation_does_not_need_them(fake_bot: FakeBot, monkeypatch):
-    """Only exclusivity touches PTB internals, so nothing else builds on them."""
-    conv, _ = build_exclusive("t_noguard", exclusive=False)
-    monkeypatch.delattr(ConversationHandler, "_get_key")
-
-    assert conv.build(make_dispatch(fake_bot), []) is not None
-
-
-async def test_ending_a_run_that_was_never_started_is_a_no_op(fake_bot: FakeBot):
-    dispatch = make_dispatch(fake_bot)
-    conv, exits = build_exclusive("t_idle")
-    conv.build(dispatch, [])
-
-    ended = await conv.end_run(dispatch, make_update(text="x"), make_context(fake_bot))
-
-    assert ended is False
-    assert exits == []
+    assert first_exits == []
 
 
 # ---------------------------------------------------------------- entry args
@@ -538,320 +702,208 @@ async def test_ending_a_run_that_was_never_started_is_a_no_op(fake_bot: FakeBot)
 def build_args_conv(name: str = "t_args"):
     conv = Conversation(name, OrderState)
 
-    @conv.entry(command="order", args=True)
-    async def start(state: OrderState, update, sku: str, qty: int = 1):
+    @conv.entry(command="order")
+    async def start(state: OrderState, sku: Arg[str], qty: Arg[int] = 1):
         state.item = sku
         state.qty = qty
         return "confirm", Screen(text=f"{sku} x{qty}?")
 
     @conv.state("confirm")
-    async def confirm(state, update):
+    async def confirm():
         return END
 
     return conv
 
 
-async def test_an_args_entry_starts_with_what_it_needs_in_hand(fake_bot: FakeBot):
+async def test_an_args_entry_starts_with_what_it_needs_in_hand():
     conv = build_args_conv()
-    entry = conv.build(make_dispatch(fake_bot), []).entry_points[0].callback
-    context = make_context(fake_bot)
-
-    result = await entry(make_update(text="/order ABC 3"), context)
-
-    assert result == "confirm"
-    state = conv._get_state(make_update(), context)
-    assert state.item == "ABC" and state.qty == 3
-    assert fake_bot.calls_to("send_message")[0]["text"] == "ABC x3?"
+    async with TestClient(make_bot(conv)) as client:
+        assert sent_texts(await client.send("/order ABC 3")) == ["ABC x3?"]
+        assert live(conv) == ("confirm", OrderState(item="ABC", qty=3))
 
 
-async def test_bad_arguments_get_the_usage_line_and_no_run_starts(fake_bot: FakeBot):
-    """Entered with its arguments or not at all."""
+async def test_bad_arguments_get_the_usage_line_and_no_run_starts():
     conv = build_args_conv()
-    entry = conv.build(make_dispatch(fake_bot), []).entry_points[0].callback
-    context = make_context(fake_bot)
+    async with TestClient(make_bot(conv)) as client:
+        (reply,) = sent_texts(await client.send("/order"))
 
-    result = await entry(make_update(text="/order"), context)
-
-    assert result is None  # PTB records no conversation
-    assert conv._get_state(make_update(), context) is None  # no draft either
-    reply = fake_bot.calls_to("send_message")[0]["text"]
+    assert live(conv) is None
     assert "/order" in reply.replace("\\", "") and "sku" in reply
 
 
-async def test_args_without_a_command_is_a_configuration_error():
+def test_arguments_on_a_non_command_step_fail_the_build():
     conv = Conversation("t_args_nocmd", OrderState)
 
-    with pytest.raises(ConfigurationError, match="args"):
-        conv.entry(callback=StopCB, args=True)
+    @conv.entry(callback=StopCB)
+    async def start(sku: Arg[str]): ...
 
+    @conv.state("s")
+    async def s(): ...
 
-def test_a_step_registration_states_its_transport():
-    """kind is the transport -- a command entry without args=True is still a
-    command; whether its extra parameters are parsed arguments or injected is
-    args' business alone, and nothing may encode it a second way."""
-    conv = Conversation("t_kind", OrderState)
-
-    @conv.entry(command="order")
-    async def start(state, update): ...
-
-    @conv.state("qty", command="skip")
-    async def skip(state, update): ...
-
-    @conv.state("qty", callback=StopCB)
-    async def stop(state, update): ...
-
-    @conv.state("qty")
-    async def qty(state, update): ...
-
-    regs = {step.fn.__name__: step.registration(conv.name) for step in conv._steps}
-    assert (regs["start"].kind, regs["start"].args) == ("command", False)
-    assert (regs["skip"].kind, regs["skip"].args) == ("command", False)
-    assert regs["stop"].kind == "callback"
-    assert regs["qty"].kind == "message"
+    with pytest.raises(ConfigurationError, match="only commands"):
+        make_bot(conv).build()
 
 
 # ------------------------------------------- an entry that starts no run
 
 
-async def test_a_bare_screen_entry_leaves_no_trace(fake_bot: FakeBot):
+async def test_a_bare_screen_entry_leaves_no_trace():
     conv = Conversation("t_noent", OrderState)
 
     @conv.entry(command="maybe")
-    async def start(state, update):
+    async def start():
         return Screen(text="not this time")
 
     @conv.state("s")
-    async def s(state, update):
+    async def s():
         return END
 
-    entry = conv.build(make_dispatch(fake_bot), []).entry_points[0].callback
-    context = make_context(fake_bot)
+    async with TestClient(make_bot(conv)) as client:
+        assert sent_texts(await client.send("/maybe")) == ["not this time"]
 
-    assert await entry(make_update(text="/maybe"), context) is None
-    assert conv._get_state(make_update(), context) is None
-    assert fake_bot.calls_to("send_message")[0]["text"] == "not this time"
+    assert live(conv) is None
 
 
-async def test_a_refused_entry_does_not_end_the_callers_other_runs(fake_bot: FakeBot):
-    """A misfired /order must not kill the flow the caller is in the middle of."""
-    dispatch = make_dispatch(fake_bot)
+async def test_a_refused_entry_does_not_end_the_callers_other_runs():
     running, running_exits = build_exclusive("t_victim")
-    handler_a = running.build(dispatch, [])
-
     picky = Conversation("t_picky", OrderState, exclusive=True)
 
-    @picky.entry(command="picky", args=True)
-    async def start(state, update, sku: str):
+    @picky.entry(command="picky")
+    async def start(sku: Arg[str]):
         return "s"
 
     @picky.state("s")
-    async def s(state, update):
+    async def s():
         return END
 
-    picky.build(dispatch, [])
-    picky.link_peers([picky, running])
+    async with TestClient(make_bot(running, picky)) as client:
+        await client.send("/t_victim")
+        await client.send("/picky")  # missing argument: never starts
+        assert running_exits == [] and live(running) is not None
 
-    context = make_context(fake_bot)
-    update = make_update(text="/t_victim")
-    await handler_a.entry_points[0].callback(update, context)
-    key = start_ptb_run(handler_a, update)
-
-    # missing argument: the entry never starts, so the peer keeps running
-    await picky._handler.entry_points[0].callback(make_update(text="/picky"), context)
-
-    assert running_exits == []
-    assert key in handler_a._conversations
-
-    # with its argument the entry starts, and only then ends the peer
-    await picky._handler.entry_points[0].callback(make_update(text="/picky ABC"), context)
-    assert running_exits == [ExitReason.CANCELLED]
+        await client.send("/picky ABC")
+        assert running_exits == [ExitReason.CANCELLED]
 
 
-async def test_a_guard_refused_entry_leaves_no_trace(fake_bot: FakeBot):
-    from vitrine.auth import Auth, admin_only
-
+async def test_a_guard_refused_entry_leaves_no_trace():
     async def resolver(update):
-        return SimpleNamespace(admin=False)
+        return {"admin": False}
 
-    auth = Auth(resolver, name="user", is_admin=lambda u: u.admin)
-    dispatch = make_dispatch(fake_bot, auth=auth)
     conv = Conversation("t_guarded", OrderState)
 
     @conv.entry(command="guarded")
     @admin_only
-    async def start(state, update):
+    async def start():
         return "s"
 
     @conv.state("s")
-    async def s(state, update):
+    async def s():
         return END
 
-    entry = conv.build(dispatch, []).entry_points[0].callback
-    context = make_context(fake_bot)
-    update = make_update(text="/guarded")
+    bot = make_bot(conv, auth=Auth(resolver, name="user", is_admin=lambda u: u["admin"]))
+    async with TestClient(bot) as client:
+        (refusal,) = sent_texts(await client.send("/guarded"))
 
-    assert await entry(update, context) is None
-    assert conv._get_state(make_update(), context) is None
-    assert update.effective_message.replies  # the refusal UX went out
+    assert "not allowed" in refusal
+    assert live(conv) is None
 
 
-async def test_an_entry_returning_end_did_start_and_finish(fake_bot: FakeBot):
+async def test_an_entry_returning_end_did_start_and_finish():
     """END counts: it ends peers and runs the exit hook, unlike a refusal."""
-    dispatch = make_dispatch(fake_bot)
     running, running_exits = build_exclusive("t_bg")
-    handler_a = running.build(dispatch, [])
-
     finished_exits: list[ExitReason] = []
     oneshot = Conversation("t_oneshot", OrderState, exclusive=True)
 
     @oneshot.entry(command="oneshot")
-    async def start(state, update):
+    async def start():
         return END, Screen(text="done already")
 
     @oneshot.state("s")
-    async def s(state, update):
+    async def s():
         return END
 
     @oneshot.on_exit
     async def on_exit(state, reason):
         finished_exits.append(reason)
 
-    oneshot.build(dispatch, [])
-    oneshot.link_peers([oneshot, running])
+    async with TestClient(make_bot(running, oneshot)) as client:
+        await client.send("/t_bg")
+        await client.send("/oneshot")
 
-    context = make_context(fake_bot)
-    update = make_update(text="/t_bg")
-    await handler_a.entry_points[0].callback(update, context)
-    start_ptb_run(handler_a, update)
-
-    result = await oneshot._handler.entry_points[0].callback(
-        make_update(text="/oneshot"), context
-    )
-
-    assert result == END
     assert running_exits == [ExitReason.CANCELLED]
     assert finished_exits == [ExitReason.FINISHED]
-    assert oneshot._get_state(make_update(), context) is None
+    assert live(oneshot) is None
 
 
-async def test_a_peers_goodbye_follows_the_new_flows_hello(fake_bot: FakeBot):
-    """Peers end *after* the entry's screen renders."""
-    dispatch = make_dispatch(fake_bot)
-
-    chatty = Conversation("t_chatty", OrderState, timeout=60, exclusive=True)
+async def test_a_peers_goodbye_follows_the_new_flows_hello():
+    chatty = Conversation("t_chatty", OrderState, exclusive=True)
 
     @chatty.entry(command="t_chatty")
-    async def chatty_start(state, update):
+    async def chatty_start():
         return "item"
 
     @chatty.state("item")
-    async def chatty_item(state, update):
+    async def chatty_item():
         return END
 
     @chatty.on_exit
-    async def chatty_exit(state, reason, delivery, update):
+    async def chatty_exit(reason, delivery, update):
         await delivery.send(update.effective_chat.id, Screen(text="goodbye"))
 
     fresh = Conversation("t_fresh", OrderState, exclusive=True)
 
     @fresh.entry(command="t_fresh")
-    async def fresh_start(state, update):
+    async def fresh_start():
         return "item", Screen(text="hello")
 
     @fresh.state("item")
-    async def fresh_item(state, update):
+    async def fresh_item():
         return END
 
-    handler_a = chatty.build(dispatch, [])
-    fresh.build(dispatch, [])
-    chatty.link_peers([chatty, fresh])
-    fresh.link_peers([chatty, fresh])
-
-    context = make_context(fake_bot)
-    update = make_update(text="/t_chatty")
-    await handler_a.entry_points[0].callback(update, context)
-    start_ptb_run(handler_a, update)
-
-    await fresh._handler.entry_points[0].callback(make_update(text="/t_fresh"), context)
-
-    texts = [c["text"] for c in fake_bot.calls_to("send_message")]
-    assert texts == ["hello", "goodbye"]
+    async with TestClient(make_bot(chatty, fresh)) as client:
+        await client.send("/t_chatty")
+        assert sent_texts(await client.send("/t_fresh")) == ["hello", "goodbye"]
 
 
 # ----------------------------------------------------- when= narrows, not swallows
 
 
-class SplitCB(CallbackData, prefix="t_split"):
-    kind: str
-
-
-async def test_when_narrows_instead_of_swallowing_the_press(fake_bot: FakeBot):
-    """A rejected press stays available to a sibling step on the same model."""
-    from telegram import CallbackQuery, Update, User
-
-    hits: list[str] = []
+def build_when_conv(hits: list[str]) -> Conversation:
     conv = Conversation("t_when", OrderState)
 
     @conv.entry(command="when")
-    async def start(state, update):
-        return "pick"
+    async def start():
+        return "pick", Screen(text="pick one")
 
     @conv.state("pick", callback=SplitCB, when=lambda d: d.kind == "a")
-    async def pick_a(state, update):
+    async def pick_a():
         hits.append("a")
         return END
 
     @conv.state("pick", callback=SplitCB, when=lambda d: d.kind == "b")
-    async def pick_b(state, update):
+    async def pick_b():
         hits.append("b")
         return END
 
-    handler = conv.build(make_dispatch(fake_bot), [])
-    first, second = handler.states["pick"]
-
-    def press(data: str) -> Update:
-        return Update(
-            update_id=1,
-            callback_query=CallbackQuery(
-                id="1",
-                from_user=User(id=1, first_name="t", is_bot=False),
-                chat_instance="ci",
-                data=data,
-            ),
-        )
-
-    press_b = press(SplitCB(kind="b").pack())
-    assert not first.check_update(press_b)  # rejected, not swallowed
-    assert second.check_update(press_b)
-
-    press_a = press(SplitCB(kind="a").pack())
-    assert first.check_update(press_a)
-    assert hits == []  # patterns only: no handler ran yet
+    return conv
 
 
-async def test_a_press_every_when_rejects_matches_no_step(fake_bot: FakeBot):
-    conv = Conversation("t_when_none", OrderState)
+async def test_when_narrows_instead_of_swallowing_the_press():
+    hits: list[str] = []
+    async with TestClient(make_bot(build_when_conv(hits))) as client:
+        await client.send("/when")
+        await client.press(SplitCB(kind="b"))
 
-    @conv.entry(command="whennone")
-    async def start(state, update):
-        return "pick"
+    assert hits == ["b"]
 
-    @conv.state("pick", callback=SplitCB, when=lambda d: d.kind == "a")
-    async def pick_a(state, update):
-        return END
 
-    from telegram import CallbackQuery, Update, User
+async def test_a_press_every_when_rejects_is_answered_by_the_catch_all():
+    hits: list[str] = []
+    conv = build_when_conv(hits)
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/when")
+        calls = await client.press(SplitCB(kind="z"))
 
-    handler = conv.build(make_dispatch(fake_bot), [])
-    press = Update(
-        update_id=1,
-        callback_query=CallbackQuery(
-            id="1",
-            from_user=User(id=1, first_name="t", is_bot=False),
-            chat_instance="ci",
-            data=SplitCB(kind="z").pack(),
-        ),
-    )
-
-    # left for the bot-level catch-all to answer, so the button doesn't spin
-    assert not handler.states["pick"][0].check_update(press)
+        assert hits == []
+        assert [c.method for c in calls] == ["answerCallbackQuery"]
+        assert live(conv)[0] == "pick"

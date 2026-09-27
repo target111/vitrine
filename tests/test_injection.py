@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from conftest import make_context, make_dispatch, make_update
 
@@ -12,7 +14,15 @@ from vitrine.exceptions import (
     NotAuthorizedError,
     NotRegisteredError,
 )
-from vitrine.injection import Depends, Invocation, Providers, resolve_kwargs
+from vitrine.injection import (
+    _MISSING,
+    DependencyScope,
+    Depends,
+    Invocation,
+    Providers,
+    resolve_kwargs,
+    run_in_update_scope,
+)
 from vitrine.routing import Registration
 
 
@@ -81,6 +91,77 @@ async def test_generator_provider_cleanup():
     await inv.aclose()
 
     assert events == ["open", "use:SESSION", "close"]
+
+
+def session_provider(events: list[str]):
+    async def session():
+        events.append("open")
+        yield "SESSION"
+        events.append("close")
+
+    return session
+
+
+async def test_an_invocation_that_outlives_its_update_holds_the_scope(fake_bot):
+    """A handler PTB runs as a task can join the update's scope and still be
+    resolving after the update is processed: its cleanups must still run."""
+    events: list[str] = []
+    providers = Providers()
+    providers.register("session", session_provider(events))
+    dispatch = make_dispatch(fake_bot, providers)
+    update = make_update(text="hi")
+    resume = asyncio.Event()
+    tasks: list[asyncio.Task] = []
+
+    async def handler(session):
+        events.append(f"use:{session}")
+
+    async def late():
+        inv = dispatch.invocation("late", update)
+        try:
+            await resume.wait()  # the update's processing ends meanwhile
+            await handler(**await resolve_kwargs(handler, inv, providers))
+        finally:
+            await inv.aclose()
+
+    async def process():
+        tasks.append(asyncio.create_task(late()))
+        await asyncio.sleep(0)  # it joins the scope
+
+    await run_in_update_scope(update, process)
+    resume.set()
+    await tasks[0]
+
+    assert events == ["open", "use:SESSION", "close"]
+
+
+async def test_a_closed_scope_refuses_providers_it_could_not_clean_up():
+    providers = Providers()
+    providers.register("session", session_provider([]))
+    scope = DependencyScope()
+    await scope.aclose()
+
+    async def handler(session): ...
+
+    with pytest.raises(InjectionError, match="scope is closed"):
+        await resolve_kwargs(handler, Invocation(scope=scope), providers)
+
+
+async def test_a_closed_scope_lets_go_of_what_it_resolved():
+    """A conversation's timeout timer keeps the update's scope for up to its
+    whole timeout; it mustn't keep the providers and principal with it."""
+    providers = Providers()
+    providers.register("repo", lambda: {"rows": [1, 2, 3]})
+    inv = Invocation()
+    inv.scope.principal = {"id": 1}
+
+    async def handler(repo): ...
+
+    await resolve_kwargs(handler, inv, providers)
+    await inv.aclose()
+
+    assert inv.scope.cache == {}
+    assert inv.scope.principal is _MISSING  # resolved afresh if asked again
 
 
 async def test_depends_marker():

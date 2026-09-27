@@ -6,7 +6,7 @@ import deferred_annotations
 import pytest
 from conftest import FakeMessage, make_update
 
-from vitrine.args import ArgSpec, Greedy, build_arg_specs, parse_args, usage_string
+from vitrine.args import Arg, ArgSpec, Greedy, build_arg_specs, parse_args, usage_string
 from vitrine.errors import ErrorRegistry
 from vitrine.exceptions import ConfigurationError, UsageError
 from vitrine.injection import Invocation, Providers
@@ -51,17 +51,42 @@ def test_v1_fallback_drops_unsupported_styles():
 # ------------------------------------------------------------------- args
 
 
-def sample(update, amount: int, target: str = "self", note: Greedy = Greedy("")):
+def sample(update, amount: Arg[int], target: Arg[str] = "self", note: Greedy = Greedy("")):
     pass
 
 
 def specs():
-    return build_arg_specs(sample, skip={"update"})
+    return build_arg_specs(sample)
 
 
 def test_specs_and_usage():
     assert [s.name for s in specs()] == ["amount", "target", "note"]
     assert usage_string("pay", specs()) == "/pay <amount> [target] [note...]"
+
+
+def test_only_marked_parameters_are_arguments():
+    """Everything else is injected, whatever its name or annotation."""
+
+    def handler(update, catalog, amount: Arg[int], count: int = 3, user_id: int = 0):
+        pass
+
+    assert [s.name for s in build_arg_specs(handler)] == ["amount"]
+
+
+def test_arg_greedy_is_greedy_too():
+    def handler(rest: Arg[Greedy]):
+        pass
+
+    (spec,) = build_arg_specs(handler)
+    assert spec.greedy and spec.required
+
+
+def test_optional_argument_types_convert():
+    def handler(limit: Arg[int | None] = None):
+        pass
+
+    assert parse_args("t", build_arg_specs(handler), "7") == {"limit": 7}
+    assert parse_args("t", build_arg_specs(handler), "") == {"limit": None}
 
 
 def test_parse_required_optional_greedy():
@@ -87,12 +112,8 @@ def test_parse_failures():
 
 
 def test_args_survive_an_unresolvable_injected_annotation():
-    """Issue #1: `update: Update` under TYPE_CHECKING broke every other arg.
-
-    The signature cannot be evaluated as a whole, so the real types have to be
-    recovered per parameter -- and only for the ones that are arguments.
-    """
-    specs = build_arg_specs(deferred_annotations.note, skip={"update"})
+    """Issue #1: `update: Update` under TYPE_CHECKING must not break the args."""
+    specs = build_arg_specs(deferred_annotations.note)
 
     assert [(s.name, s.annotation) for s in specs] == [
         ("tag", str),
@@ -102,9 +123,7 @@ def test_args_survive_an_unresolvable_injected_annotation():
 
 
 def test_a_greedy_arg_stays_greedy_with_deferred_annotations():
-    """The string 'Greedy' matched nothing, so the trailing param silently
-    stopped consuming the rest of the line."""
-    specs = build_arg_specs(deferred_annotations.note, skip={"update"})
+    specs = build_arg_specs(deferred_annotations.note)
 
     assert specs[-1].greedy
     assert parse_args("note", specs, "x 5 and the rest") == {
@@ -118,7 +137,7 @@ def test_an_argument_type_must_be_importable_at_runtime():
     """Converting calls the type, so a TYPE_CHECKING-only one cannot work --
     say so at build time instead of rejecting every value the user sends."""
     with pytest.raises(ConfigurationError, match="target"):
-        build_arg_specs(deferred_annotations.unresolvable_argument, skip={"update"})
+        build_arg_specs(deferred_annotations.unresolvable_argument)
 
 
 def test_bool_conversion():
@@ -127,36 +146,12 @@ def test_bool_conversion():
     assert parse_args("t", spec, "off") == {"flag": False}
 
 
-def test_a_depends_parameter_is_not_a_command_argument():
-    """Nothing registers a name for it, so it was landing in the usage line
-    and eating a token off the command line that the injector threw away."""
-    from vitrine.injection import Depends
-
-    def make_token():
-        return "tok"
-
-    def pay(update, amount: int, token=Depends(make_token), note: Greedy = Greedy("")):
+def test_a_greedy_parameter_must_come_last():
+    def pay(note: Greedy, amount: Arg[int]):
         pass
 
-    specs = build_arg_specs(pay, skip={"update"})
-
-    assert [s.name for s in specs] == ["amount", "note"]
-    assert usage_string("pay", specs) == "/pay <amount> [note...]"
-    # the token that used to be eaten now reaches the greedy tail
-    assert parse_args("pay", specs, "5 for lunch") == {
-        "amount": 5,
-        "note": "for lunch",
-    }
-
-
-def test_a_greedy_parameter_after_a_depends_parameter_is_still_last():
-    from vitrine.injection import Depends
-
-    def pay(update, note: Greedy, token=Depends(lambda: "tok")):
-        pass
-
-    specs = build_arg_specs(pay, skip={"update"})
-    assert [s.name for s in specs] == ["note"]  # and no ConfigurationError
+    with pytest.raises(ConfigurationError, match="must come last"):
+        build_arg_specs(pay)
 
 
 # ------------------------------------------------------------------- pagination

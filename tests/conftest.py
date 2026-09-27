@@ -1,7 +1,9 @@
-"""Test fakes: no network, no live PTB application.
+"""Unit-level fakes: no network, no PTB application.
 
-Real ``telegram`` objects (Message, Chat, User, PhotoSize) are used as plain
-data; a recording FakeBot stands in for the API client.
+For the pipeline and Delivery in isolation: real ``telegram`` objects (Message,
+Chat, User, PhotoSize) as plain data and a recording FakeBot for the API
+client. Anything about which handler an update reaches goes through
+``vitrine.testing.TestClient`` instead, which runs PTB's real dispatcher.
 """
 
 from __future__ import annotations
@@ -179,16 +181,14 @@ def make_dispatch(
     auth: Any = None,
     middlewares: list | None = None,
 ) -> Dispatch:
-    dispatch = Dispatch(
+    return Dispatch(
         providers or Providers(),
         ErrorRegistry(),
         RateLimiter(),
+        Delivery(fake_bot, InMemoryFileIdCache()),
         auth,
         middlewares or [],
     )
-    dispatch.delivery = Delivery(fake_bot, InMemoryFileIdCache())
-
-    return dispatch
 
 
 @pytest.fixture

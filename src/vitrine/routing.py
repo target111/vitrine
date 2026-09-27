@@ -17,6 +17,8 @@ A :class:`Router` collects handlers declaratively and composes into trees::
 Routers carry their own middleware (applied to every handler registered on
 them and their children) and are how a large app splits its bot layer into
 packages. Raw PTB handlers remain a first-class escape hatch via ``.raw()``.
+A router is frozen once a bot built from it: registering later would be
+silently ignored, so it raises instead.
 """
 
 from __future__ import annotations
@@ -25,9 +27,10 @@ import inspect
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from telegram.ext import (
+    BaseHandler,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
@@ -42,10 +45,11 @@ from .screens import ReplyButton
 if TYPE_CHECKING:
     from .conversations import Conversation
 
+F = TypeVar("F", bound=Callable[..., Any])
+
 #: what Telegram accepts in a command name. PTB lowercases before validating,
-#: so an invalid name dispatches fine locally while ``setMyCommands`` rejects
-#: the whole batch it appears in -- hence the check happens here, at
-#: registration, where the offending decorator is on the stack.
+#: so an invalid name would dispatch locally while ``setMyCommands`` rejects
+#: the whole batch it appears in.
 _COMMAND_NAME = re.compile(r"[a-z0-9_]{1,32}\Z")
 
 
@@ -54,8 +58,8 @@ def validate_command_name(name: str) -> str:
         raise ConfigurationError(
             f"command name {name!r} would be rejected by Telegram: names are "
             f"1-32 characters of lowercase a-z, 0-9 and underscore. PTB would "
-            f"still dispatch it, but publishing it would silently freeze every "
-            f"command menu at whatever the previous run wrote."
+            f"still dispatch it, but publishing it would freeze every command "
+            f"menu at whatever the previous run wrote."
         )
 
     return name
@@ -64,12 +68,9 @@ def validate_command_name(name: str) -> str:
 def split_docstring(fn: Callable[..., Any]) -> tuple[str, str]:
     """Split a handler docstring into (summary, detail body).
 
-    The summary is the whole first *paragraph* -- not the first line, because a
-    summary that wraps across two source lines would otherwise be cut at the
-    wrap, and the orphaned remainder would open the detail text. Everything
-    after the first blank line is the detail body, shown by ``/help <command>``.
+    The summary is the whole first paragraph, joined onto one line; the rest
+    is the detail body shown by ``/help <command>``.
     """
-    # cleandoc already drops leading blank lines, so the paragraph starts at 0.
     lines = inspect.cleandoc(fn.__doc__ or "").splitlines()
     end = next((i for i, line in enumerate(lines) if not line.strip()), len(lines))
 
@@ -79,13 +80,15 @@ def split_docstring(fn: Callable[..., Any]) -> tuple[str, str]:
     return summary, detail
 
 
+Kind = Literal["command", "callback", "message"]
+
+
 @dataclass
 class Registration:
     """One declaratively-registered handler and its metadata."""
 
-    #: the transport: which PTB handler carries the update. Says nothing about
-    #: how extra parameters are filled -- that is ``args`` alone.
-    kind: str  # "command" | "callback" | "message"
+    #: the transport: which PTB handler carries the update
+    kind: Kind
     fn: Callable[..., Any]
     name: str
     command: str | None = None
@@ -97,12 +100,8 @@ class Registration:
     filters: Any = None  # PTB filters for message handlers
     group: int = 0
     edits: bool = False  # opt in to receiving edited messages
-    #: whether extra handler params are parsed command arguments (meaningful
-    #: only when the transport is a command). True for router commands; a
-    #: conversation entry only opts in via ``args=True`` (its extra params are
-    #: injected otherwise), and /help must not present injected parameters as
-    #: a usage line.
-    args: bool = True
+    #: a reply-keyboard press: navigation, so it outranks a live conversation
+    reply_button: bool = False
     middlewares: list[Middleware] = field(default_factory=list)
 
 
@@ -110,20 +109,13 @@ def _minus_edits(base: Any, edits: bool) -> Any:
     return base if edits else base & ~ptb_filters.UpdateType.EDITED
 
 
-def ptb_handler(reg: Registration, callback: Callable[..., Any]) -> Any:
+def ptb_handler(reg: Registration, callback: Callable[..., Any]) -> BaseHandler:
     """The one PTB handler a registration implies.
 
-    Every registration -- the bot's flat handlers and every conversation step
-    -- is wired through here, so the edit-exclusion rule cannot drift between
-    call sites. The rule: take what the handler would otherwise match and
-    subtract ``UpdateType.EDITED``, unless ``edits=True`` -- exclude edits,
-    and nothing else. Subtracting matters: message handlers matched channel
-    posts and business messages before the exclusion existed and must keep
-    matching them, while commands matched only PTB's ``CommandHandler``
-    default (``UpdateType.MESSAGES``) and must not quietly widen beyond it.
-    The default is spelled out here so there is a baseline to subtract from,
-    instead of a replacement filter that encodes the reach and the exclusion
-    as one opaque choice.
+    Flat handlers and conversation steps both come from here. Edited messages
+    are subtracted from what the handler would otherwise match unless
+    ``edits=True``; commands keep PTB's default reach (``UpdateType.MESSAGES``),
+    message handlers keep theirs (channel posts, business messages).
     """
     if reg.kind == "command":
         assert reg.command is not None
@@ -135,9 +127,8 @@ def ptb_handler(reg: Registration, callback: Callable[..., Any]) -> Any:
 
     if reg.kind == "callback":
         assert reg.cb_model is not None
-        # when= narrows inside the pattern: a rejected press stays available
-        # to a sibling handler on the same callback model. Presses have no
-        # edited form, so the edit rule does not apply.
+        # when= narrows inside the pattern, so a rejected press stays
+        # available to a sibling handler on the same model
         return CallbackQueryHandler(
             callback, pattern=pattern_for(reg.cb_model, reg.cb_when)
         )
@@ -156,6 +147,14 @@ class Router:
         self.children: list[Router] = []
         self.conversations: list[Conversation] = []
         self.raw_handlers: list[tuple[Any, int]] = []
+        self.frozen = False
+
+    def _check_mutable(self) -> None:
+        if self.frozen:
+            raise ConfigurationError(
+                f"router {self.name or '(unnamed)'!r} belongs to a bot that is already "
+                f"built; register handlers before calling build() or run()"
+            )
 
     # -- registration decorators ----------------------------------------------
 
@@ -168,17 +167,16 @@ class Router:
         hidden: bool = False,
         edits: bool = False,
         group: int = 0,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Register a ``/command`` handler; extra params become typed arguments.
+    ) -> Callable[[F], F]:
+        """Register a ``/command`` handler; ``Arg[...]`` params are its arguments.
 
-        ``edits=True`` opts in to also receiving edited messages -- by default
-        an edited ``/command`` is ignored, because Telegram redelivers the whole
-        message and editing an old command would otherwise re-run it.
+        ``edits=True`` opts in to edited messages too: by default an edited
+        ``/command`` is ignored, since editing an old command would re-run it.
         """
+        self._check_mutable()
 
-        def register(fn: Callable[..., Any]) -> Callable[..., Any]:
+        def register(fn: F) -> F:
             desc = split_docstring(fn)[0] if description is None else description
-
             self.registrations.append(
                 Registration(
                     kind="command",
@@ -192,7 +190,6 @@ class Router:
                     group=group,
                 )
             )
-
             return fn
 
         return register
@@ -203,22 +200,20 @@ class Router:
         *,
         when: Callable[[Any], bool] | None = None,
         group: int = 0,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    ) -> Callable[[F], F]:
         """Register a handler for one typed callback-data model.
 
-        The decoded, validated instance is injected as the ``data`` parameter.
-        ``when`` optionally narrows the match on the decoded payload: a press
-        this handler's ``when`` rejects stays available to another handler on
-        the same model rather than being swallowed.
+        The decoded, validated instance is injected as ``data``. ``when``
+        narrows the match on the decoded payload; a press it rejects stays
+        available to another handler on the same model.
 
-        Callback handlers belong in the default group. A catch-all sits last in
-        that group to answer presses no handler took (Telegram spins the button
-        until *something* answers), Telegram accepts one answer per press, and
-        PTB runs groups independently -- so a callback handler in a later group
-        still runs, but its answer (and any alert) arrives too late to display.
+        Keep callback handlers in the default group: a catch-all sits last
+        there to answer presses nothing took, Telegram accepts one answer per
+        press, and a handler in a later group would answer too late.
         """
+        self._check_mutable()
 
-        def register(fn: Callable[..., Any]) -> Callable[..., Any]:
+        def register(fn: F) -> F:
             self.registrations.append(
                 Registration(
                     kind="callback",
@@ -229,22 +224,42 @@ class Router:
                     group=group,
                 )
             )
-
             return fn
 
         return register
 
     def message(
         self, filters: Any = None, *, edits: bool = False, group: int = 0
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    ) -> Callable[[F], F]:
         """Register a message handler with PTB filters (defaults to text messages).
 
-        Edited messages are excluded unless ``edits=True``: an edit arrives as
-        a fresh update carrying the whole message, so without the exclusion,
-        editing any old text would re-feed it to this handler.
+        Edited messages are excluded unless ``edits=True``. While a caller has
+        a live conversation, its steps see their messages first.
         """
+        self._check_mutable()
+        return self._message(filters, edits=edits, group=group, reply_button=False)
 
-        def register(fn: Callable[..., Any]) -> Callable[..., Any]:
+    def reply_button(self, *buttons: ReplyButton | str, group: int = 0) -> Callable[[F], F]:
+        """Register a handler for presses of one or more reply-keyboard buttons.
+
+        A press arrives as a text message equal to the label, so this is a
+        message handler with an exact-text filter. Presses are navigation:
+        they reach this handler even while the caller is inside a
+        conversation whose step would accept any text.
+        """
+        self._check_mutable()
+        labels = [b.text if isinstance(b, ReplyButton) else b for b in buttons]
+        if not labels:
+            raise ValueError("reply_button needs at least one button or label")
+
+        return self._message(
+            ptb_filters.Text(labels), edits=False, group=group, reply_button=True
+        )
+
+    def _message(
+        self, filters: Any, *, edits: bool, group: int, reply_button: bool
+    ) -> Callable[[F], F]:
+        def register(fn: F) -> F:
             self.registrations.append(
                 Registration(
                     kind="message",
@@ -253,50 +268,45 @@ class Router:
                     filters=filters,
                     edits=edits,
                     group=group,
+                    reply_button=reply_button,
                 )
             )
-
             return fn
 
         return register
 
-    def reply_button(
-        self, *buttons: ReplyButton | str, group: int = 0
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Register a handler for presses of one or more reply-keyboard buttons.
-
-        A press arrives as a plain text message equal to the button label, so
-        this is sugar for a message handler with an exact-text filter. The full
-        pipeline applies (DI, guards, middleware), and a returned
-        :class:`~vitrine.screens.Screen` replies — a persistent keyboard set at
-        ``/start`` becomes a launcher that works from anywhere.
-        """
-        labels = [b.text if isinstance(b, ReplyButton) else b for b in buttons]
-        if not labels:
-            raise ValueError("reply_button needs at least one button or label")
-
-        return self.message(ptb_filters.Text(labels), group=group)
-
     def middleware(self, mw: Middleware) -> Middleware:
         """Attach middleware to every handler on this router and its children."""
+        self._check_mutable()
         self.middlewares.append(mw)
         return mw
 
     def include(self, router: Router) -> None:
         """Mount a sub-router."""
+        self._check_mutable()
         self.children.append(router)
 
     def conversation(self, conversation: Conversation) -> Conversation:
         """Mount a guided conversation on this router."""
+        self._check_mutable()
         self.conversations.append(conversation)
         return conversation
 
-    def raw(self, handler: Any, group: int = 0) -> Any:
+    def raw(self, handler: BaseHandler, group: int = 0) -> BaseHandler:
         """Escape hatch: register a plain PTB handler untouched."""
+        self._check_mutable()
         self.raw_handlers.append((handler, group))
         return handler
 
     # -- traversal -------------------------------------------------------------
+
+    def freeze(self) -> None:
+        """Refuse further registrations here and in every sub-router."""
+        self.frozen = True
+        for child in self.children:
+            child.freeze()
+        for conv in self.conversations:
+            conv.frozen = True
 
     def walk(
         self, outer_middlewares: list[Middleware] | None = None

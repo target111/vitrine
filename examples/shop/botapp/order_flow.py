@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from domain.models import User
 from domain.services import CatalogService, OrderService
 
-from vitrine import ANY_STATE, END, Conversation, ExitReason, Screen
+from vitrine import ANY_STATE, CANCEL, END, Arg, Conversation, ExitReason, Screen
 from vitrine.logging import audit
 
 from . import views
@@ -37,16 +37,16 @@ async def begin(state: OrderDraft, data: BuyCB, catalog: CatalogService):
     return "qty", views.ask_qty(product)
 
 
-@order_flow.entry(command="order", description="Order a product by its SKU", args=True)
-async def begin_by_command(state: OrderDraft, sku: str, catalog: CatalogService):
+@order_flow.entry(command="order", description="Order a product by its SKU")
+async def begin_by_command(state: OrderDraft, sku: Arg[str], catalog: CatalogService):
     """An entry command is a real command: /order shows up in /help and in the
     Telegram command menu, exactly like one declared with @router.command.
 
-    args=True gives it @router.command's typed arguments too: a missing sku
-    gets the usage line back and the run never starts. An unknown SKU raises
-    UnknownProduct, which the DomainError handler in main.py turns into a
-    screen -- no state is returned, so no run starts there either, and the
-    caller's half-finished order (if any) is left alone.
+    It takes Arg[...] arguments like one too: a missing sku gets the usage
+    line back and the run never starts. An unknown SKU raises UnknownProduct,
+    which the DomainError handler in main.py turns into a screen -- no state
+    is returned, so no run starts there either, and the caller's
+    half-finished order (if any) is left alone.
     """
     product = await catalog.get(sku)
     state.sku = sku
@@ -68,10 +68,10 @@ async def skip_qty(state: OrderDraft, catalog: CatalogService):
 async def cancel_button():
     """One handler, every state: the Cancel button works wherever it is shown.
 
-    A step needs no parameters at all if it uses none. Note this ends the run
-    as FINISHED, not CANCELLED -- only the /cancel fallback reports the latter.
+    Returning CANCEL (rather than END) ends the run as CANCELLED, the same as
+    the /cancel fallback, so on_exit records it as abandoned.
     """
-    return END, Screen(text="Cancelled — nothing was charged.")
+    return CANCEL, Screen(text="Cancelled — nothing was charged.")
 
 
 @order_flow.state("qty")
@@ -96,7 +96,7 @@ async def confirm(
     catalog: CatalogService,
 ):
     if not data.yes:
-        return END, Screen(text="Order aborted — nothing was charged.")
+        return CANCEL, Screen(text="Order aborted — nothing was charged.")
 
     product = await catalog.get(state.sku)
     order = await orders.place(user, update.effective_chat.id, state.sku, state.qty)
@@ -106,8 +106,8 @@ async def confirm(
 
 
 @order_flow.cancel()
-async def cancel(update):
-    await update.effective_message.reply_text("Cancelled — nothing was charged.")
+async def cancel():
+    return Screen(text="Cancelled — nothing was charged.")
 
 
 @order_flow.on_exit

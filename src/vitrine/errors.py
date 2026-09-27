@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, TypeVar
 
 from telegram.error import TelegramError
 
@@ -33,11 +33,11 @@ from .screens import Screen
 logger = logging.getLogger("vitrine.errors")
 
 ErrorHandler = Callable[..., Awaitable[Any]]
+H = TypeVar("H", bound=ErrorHandler)
 
 
-async def _answer_or_reply(inv: Invocation, text: str, *, show_alert: bool = False) -> None:
+async def _answer_or_reply(update: Any, text: str, *, show_alert: bool = False) -> None:
     """Lightweight fallback UX when a handler doesn't render a screen."""
-    update = inv.update
     query = getattr(update, "callback_query", None) if update else None
     if query is not None:
         try:
@@ -59,10 +59,10 @@ class ErrorRegistry:
         self._handlers: dict[type[BaseException], ErrorHandler] = {}
         self._register_defaults()
 
-    def on(self, exc_type: type[BaseException]) -> Callable[[ErrorHandler], ErrorHandler]:
+    def on(self, exc_type: type[BaseException]) -> Callable[[H], H]:
         """Decorator: register (or override) UX for an exception type."""
 
-        def register(fn: ErrorHandler) -> ErrorHandler:
+        def register(fn: H) -> H:
             self._handlers[exc_type] = fn
             return fn
 
@@ -99,27 +99,25 @@ class ErrorRegistry:
             await self._last_resort(error, inv)
             return
 
-        if isinstance(result, Screen):
-            if inv.delivery is not None and inv.update is not None:
+        if isinstance(result, Screen) and inv.update is not None:
+            if inv.delivery is not None:
                 await inv.delivery.render(inv.update, result)
-            elif inv.update is not None and inv.context is not None:
+            elif inv.context is not None:
                 await result.render(inv.update, inv.context)
 
     async def _last_resort(self, error: BaseException, inv: Invocation) -> None:
         logger.exception("unhandled error in %s", inv.handler_name, exc_info=error)
-        await _answer_or_reply(inv, "Something went wrong. Please try again.")
+        await _answer_or_reply(inv.update, "Something went wrong. Please try again.")
 
     def _register_defaults(self) -> None:
         @self.on(Exception)
-        async def unexpected(error: BaseException, update: Any, context: Any) -> None:
+        async def unexpected(error: BaseException, update: Any) -> None:
             logger.exception("unhandled error", exc_info=error)
-            inv = Invocation(update=update, context=context)
-            await _answer_or_reply(inv, "Something went wrong. Please try again.")
+            await _answer_or_reply(update, "Something went wrong. Please try again.")
 
         @self.on(UserFacingError)
-        async def user_facing(error: UserFacingError, update: Any, context: Any) -> None:
-            inv = Invocation(update=update, context=context)
-            await _answer_or_reply(inv, error.message, show_alert=error.show_alert)
+        async def user_facing(error: UserFacingError, update: Any) -> None:
+            await _answer_or_reply(update, error.message, show_alert=error.show_alert)
 
         @self.on(UsageError)
         async def usage(error: UsageError, update: Any) -> Screen | None:
@@ -133,16 +131,10 @@ class ErrorRegistry:
             if error.usage:
                 doc.line("Usage: ", code(error.usage))
 
-            # Returned, not sent: the Screen goes out through Delivery like
-            # every other message the app produces. Argument parsing only runs
-            # for commands, so the usual usage error arrives on a message update
-            # and is sent to the chat. Raise UsageError by hand from a callback
-            # handler and Delivery edits that message instead, as it would for
-            # any Screen returned there.
+            # returned, so it goes out through Delivery like any other Screen
             return Screen(text=doc)
 
         @self.on(TelegramError)
-        async def telegram_error(error: TelegramError, update: Any, context: Any) -> None:
+        async def telegram_error(error: TelegramError, update: Any) -> None:
             logger.warning("telegram API error: %s", error)
-            inv = Invocation(update=update, context=context)
-            await _answer_or_reply(inv, "Telegram hiccuped. Please try again.")
+            await _answer_or_reply(update, "Telegram hiccuped. Please try again.")

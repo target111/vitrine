@@ -1,19 +1,21 @@
-"""Bot assembly: wiring, validation, auto-/help, ban gate."""
+"""Bot assembly: wiring, validation, auto-/help, ban gate -- through real updates."""
 
 from __future__ import annotations
 
 import pytest
-from conftest import FakeQuery, make_context, make_update
-from telegram.ext import (
-    ApplicationHandlerStop,
-    CallbackQueryHandler,
-    CommandHandler,
-    ConversationHandler,
-)
 
-from vitrine import Auth, Bot, CallbackData, Conversation, ExitReason, Router
-from vitrine import commands as command_discovery
+from vitrine import (
+    Arg,
+    Auth,
+    Bot,
+    CallbackData,
+    Conversation,
+    ExitReason,
+    Router,
+    Screen,
+)
 from vitrine.exceptions import ConfigurationError
+from vitrine.testing import TestClient, sent_texts
 
 
 class WireCB(CallbackData, prefix="t_wire"):
@@ -24,38 +26,45 @@ def make_bot(**kwargs) -> Bot:
     return Bot(token="123:TEST", **kwargs)
 
 
-def test_wire_handlers_produces_ptb_handlers():
+def plain(text: str | None) -> str:
+    return (text or "").replace("\\", "")
+
+
+async def test_every_kind_of_registration_is_reachable():
     bot = make_bot()
     sub = Router("admin")
 
     @bot.command("start", description="Start here")
-    async def start(update): ...
+    async def start():
+        return Screen(text="started")
 
-    @sub.command("ban", scope="admin", hidden=False)
-    async def ban(update, user_id: int): ...
+    @sub.command("ban", scope="admin")
+    async def ban(user_id: Arg[int]):
+        return Screen(text=f"banned {user_id}")
 
     @sub.callback(WireCB)
-    async def page(data): ...
+    async def page(data: WireCB):
+        return Screen(text=f"page {data.page}")
 
     conv = Conversation("t_conv")
 
     @conv.entry(command="go")
-    async def go(update): ...
+    async def go():
+        return "step", Screen(text="going")
 
     @conv.state("step")
-    async def step(update): ...
+    async def step():
+        return None
 
     bot.include(sub)
     bot.conversation(conv)
 
-    wired = bot._wire_handlers()
-    kinds = [type(handler) for handler, _ in wired]
-
-    assert kinds.count(CommandHandler) == 3  # start, ban, auto-/help
-    assert CallbackQueryHandler in kinds
-    assert ConversationHandler in kinds
-    # auto-registered /help appears in the registrations
-    assert any(reg.command == "help" for reg in bot._registrations)
+    async with TestClient(bot) as client:
+        assert sent_texts(await client.send("/start")) == ["started"]
+        assert sent_texts(await client.send("/ban 7")) == ["banned 7"]
+        assert sent_texts(await client.press(WireCB(page=3))) == ["page 3"]
+        assert sent_texts(await client.send("/go")) == ["going"]
+        assert "Available commands" in plain((await client.send("/help"))[0].text)
 
 
 def test_unresolvable_handler_param_fails_at_build_time():
@@ -65,7 +74,7 @@ def test_unresolvable_handler_param_fails_at_build_time():
     async def broken(data, mystery_service): ...
 
     with pytest.raises(ConfigurationError, match="mystery_service"):
-        bot._wire_handlers()
+        bot.build()
 
 
 def test_provider_registration_forms():
@@ -83,59 +92,57 @@ def test_provider_registration_forms():
     assert {"alpha", "beta", "gamma"} <= bot.providers.names()
 
 
-async def test_ban_gate_blocks_banned_users():
-    class U:
-        def __init__(self, banned):
-            self.banned = banned
-
+async def test_a_banned_caller_pressing_a_button_is_told_once():
     async def resolver(update):
-        return U(banned=update.effective_user.id == 666)
+        return {"banned": update.effective_user.id == 666}
 
-    bot = make_bot(auth=Auth(resolver, name="user", is_banned=lambda u: u.banned))
-    update = make_update(user_id=666, query=FakeQuery(data="x"))
-    with pytest.raises(ApplicationHandlerStop):
-        await bot._ban_gate(update, make_context())
-    assert update.callback_query.answers  # told politely, once
+    bot = make_bot(auth=Auth(resolver, name="user", is_banned=lambda u: u["banned"]))
 
-    # a normal user passes through
-    await bot._ban_gate(make_update(user_id=1), make_context())
+    @bot.callback(WireCB)
+    async def page():
+        return Screen(text="page")
+
+    async with TestClient(bot, user_id=666) as client:
+        await client.send("/help")  # something to press on (help isn't gated)
+        calls = await client.press(WireCB())
+
+    assert [c.method for c in calls] == ["answerCallbackQuery"]
+    assert calls[0].params.get("show_alert") is True
 
 
-async def test_help_screen_respects_scopes():
-    class U:
-        def __init__(self, admin):
-            self.admin = admin
+# ---------------------------------------------------------------------- /help
 
+
+def scoped_bot() -> Bot:
     async def resolver(update):
-        return U(admin=update.effective_user.id == 1)
+        return {"admin": update.effective_user.id == 1}
 
-    bot = make_bot(auth=Auth(resolver, name="user", is_admin=lambda u: u.admin))
+    bot = make_bot(auth=Auth(resolver, name="user", is_admin=lambda u: u["admin"]))
 
     @bot.command("start", description="Begin")
-    async def start(update): ...
+    async def start(): ...
 
     @bot.command("ban", description="Ban a user", scope="admin")
-    async def ban(update): ...
+    async def ban(): ...
 
     @bot.command("secret", hidden=True)
-    async def secret(update): ...
+    async def secret(): ...
 
-    bot._wire_handlers()
-    help_reg = next(r for r in bot._registrations if r.command == "help")
-
-    admin_screen = await help_reg.fn(make_update(user_id=1), make_context())
-    text, _ = admin_screen.content()
-    assert "/start" in text.replace("\\", "") and "/ban" in text.replace("\\", "")
-    assert "secret" not in text
-
-    user_screen = await help_reg.fn(make_update(user_id=2), make_context())
-    text, _ = user_screen.content()
-    assert "/ban" not in text.replace("\\", "")
+    return bot
 
 
-async def test_visible_scopes_closes_provider_cleanups():
-    """/help principal resolution must run generator-provider cleanups."""
-    closed = []
+async def test_help_lists_what_the_caller_may_see():
+    async with TestClient(scoped_bot(), user_id=1) as client:
+        text = plain((await client.send("/help"))[0].text)
+    assert "/start" in text and "/ban" in text and "secret" not in text
+
+    async with TestClient(scoped_bot(), user_id=2) as client:
+        text = plain((await client.send("/help"))[0].text)
+    assert "/start" in text and "/ban" not in text
+
+
+async def test_help_runs_the_resolvers_provider_cleanups():
+    closed: list[bool] = []
 
     async def resolver(session):
         return {"id": 1}
@@ -147,123 +154,65 @@ async def test_visible_scopes_closes_provider_cleanups():
         yield "sess"
         closed.append(True)
 
-    await bot._visible_scopes(make_update(), make_context())
+    async with TestClient(bot) as client:
+        await client.send("/help")
+
     assert closed == [True]
 
 
-async def test_conversation_entry_commands_reach_help(fake_bot):
-    """A conversation's entry command is still a command: users must find it."""
+# ------------------------------------------------------- conversation entries
+
+
+def entry_bot(*, hidden: bool = False) -> Bot:
     bot = make_bot()
     conv = Conversation("t_help_conv")
 
-    @conv.entry(command="order", description="Place an order")
-    async def order(update): ...
+    @conv.entry(command="order", description="Place an order", hidden=hidden)
+    async def order(): ...
 
     @conv.state("item")
-    async def item(update): ...
+    async def item(): ...
 
     bot.conversation(conv)
-    wired = bot._wire_handlers()
-
-    # it is handled by the ConversationHandler, not by a second CommandHandler
-    assert [type(h) for h, _ in wired].count(CommandHandler) == 1  # only auto-/help
-
-    help_reg = next(r for r in bot._registrations if r.command == "help")
-    screen = await help_reg.fn(make_update(user_id=1), make_context())
-    text, _ = screen.content()
-    assert "/order" in text.replace("\\", "")
-    assert "Place an order" in text
+    return bot
 
 
-async def test_conversation_entry_commands_are_published_to_telegram(fake_bot):
-    bot = make_bot()
-    conv = Conversation("t_menu_conv")
-
-    @conv.entry(command="order", description="Place an order")
-    async def order(update): ...
-
-    @conv.state("item")
-    async def item(update): ...
-
-    bot.conversation(conv)
-    bot._wire_handlers()
-
-    async def no_scopes() -> dict[str, list[int]]:
-        return {}
-
-    await command_discovery.CommandMenus().sync(fake_bot, bot._registrations, no_scopes)
-
-    (published,) = fake_bot.calls_to("set_my_commands")[0]["args"]
-    assert [c.command for c in published] == ["help", "order"]
+async def test_conversation_entry_commands_reach_help():
+    async with TestClient(entry_bot()) as client:
+        text = plain((await client.send("/help"))[0].text)
+    assert "/order" in text and "Place an order" in text
 
 
-async def test_a_hidden_conversation_entry_stays_out_of_help(fake_bot):
-    bot = make_bot()
-    conv = Conversation("t_hidden_conv")
-
-    @conv.entry(command="secret", hidden=True)
-    async def secret(update): ...
-
-    @conv.state("item")
-    async def item(update): ...
-
-    bot.conversation(conv)
-    bot._wire_handlers()
-
-    help_reg = next(r for r in bot._registrations if r.command == "help")
-    screen = await help_reg.fn(make_update(user_id=1), make_context())
-    text, _ = screen.content()
-    assert "secret" not in text
+async def test_a_hidden_conversation_entry_stays_out_of_help():
+    async with TestClient(entry_bot(hidden=True)) as client:
+        text = plain((await client.send("/help"))[0].text)
+    assert "order" not in text
 
 
-async def test_a_press_no_handler_took_is_answered_by_the_catch_all(fake_bot):
-    """Nothing leaves a button spinning: a NOOP button, or one every when=
-    rejected, gets answered instead of spinning until Telegram's timeout."""
-    from telegram import CallbackQuery, Update, User
+async def test_conversation_entry_commands_are_published_to_telegram():
+    async with TestClient(entry_bot()) as client:
+        await client.bot.sync_commands()
 
-    bot = make_bot()
-
-    @bot.callback(WireCB, when=lambda d: d.page == 1)
-    async def only_page_one(data): ...
-
-    wired = bot._wire_handlers()
-    catch_all, group = wired[-1]
-    assert group == 0  # last in the *default* group: see Router.callback docs
-    assert isinstance(catch_all, CallbackQueryHandler)
-
-    press = Update(
-        update_id=1,
-        callback_query=CallbackQuery(
-            id="1",
-            from_user=User(id=1, first_name="t", is_bot=False),
-            chat_instance="ci",
-            data=WireCB(page=2).pack(),  # every when= on its model rejects it
-        ),
-    )
-    handler_for_model = next(
-        h for h, _ in wired[:-1] if isinstance(h, CallbackQueryHandler)
-    )
-    assert not handler_for_model.check_update(press)
-    assert catch_all.check_update(press)
-
-    query = FakeQuery(data="__noop__")
-    await catch_all.callback(make_update(query=query), make_context(fake_bot))
-    assert query.answers  # answered silently
+    (published,) = client.calls("setMyCommands")
+    assert [c["command"] for c in published.params["commands"]] == ["help", "order"]
 
 
-async def test_exclusive_conversations_are_linked_across_routers(fake_bot):
+# ------------------------------------------------------------------ exclusivity
+
+
+async def test_exclusive_conversations_are_linked_across_routers():
     """Peers are found bot-wide: a sub-router's flow still ends the other one."""
     bot = make_bot()
-    exits = []
+    exits: list[ExitReason] = []
 
     top = Conversation("t_top", exclusive=True)
 
     @top.entry(command="top")
-    async def top_start(update):
+    async def top_start():
         return "item"
 
     @top.state("item")
-    async def top_item(update): ...
+    async def top_item(): ...
 
     @top.on_exit
     async def top_exit(reason):
@@ -273,26 +222,21 @@ async def test_exclusive_conversations_are_linked_across_routers(fake_bot):
     nested = Conversation("t_nested", exclusive=True)
 
     @nested.entry(command="nested")
-    async def nested_start(update):
+    async def nested_start():
         return "item"
 
     @nested.state("item")
-    async def nested_item(update): ...
+    async def nested_item(): ...
 
     bot.conversation(top)
     sub_router.conversation(nested)
     bot.include(sub_router)
-    bot._wire_handlers()
 
-    assert [peer.name for peer in top._peers] == ["t_nested"]
+    async with TestClient(bot) as client:
+        await client.send("/top")
+        assert top.active(chat_id=42, user_id=42) is not None
+        await client.send("/nested")
 
-    context = make_context(fake_bot)
-    update = make_update(text="/top")
-    await top._handler.entry_points[0].callback(update, context)
-    key = top._handler._get_key(update)
-    top._handler._conversations[key] = "item"  # what PTB records for a live run
-
-    await nested._handler.entry_points[0].callback(make_update(text="/nested"), context)
-
-    assert exits == [ExitReason.CANCELLED]
-    assert key not in top._handler._conversations
+        assert exits == [ExitReason.CANCELLED]
+        assert top.active(chat_id=42, user_id=42) is None
+        assert nested.active(chat_id=42, user_id=42) is not None

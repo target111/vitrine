@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from conftest import FakeQuery, make_context, make_dispatch, make_message, make_update
 
-from vitrine.args import Greedy
+from vitrine.args import Arg, Greedy
 from vitrine.exceptions import UserFacingError
 from vitrine.routing import Registration
 from vitrine.screens import Screen
@@ -13,7 +13,7 @@ from vitrine.screens import Screen
 async def test_command_args_parsed_and_injected(fake_bot):
     seen = {}
 
-    async def pay(update, amount: float, note: Greedy = Greedy("-")):
+    async def pay(update, amount: Arg[float], note: Greedy = Greedy("-")):
         seen.update(amount=amount, note=note)
 
     reg = Registration(kind="command", fn=pay, name="pay", command="pay")
@@ -26,7 +26,7 @@ async def test_command_args_parsed_and_injected(fake_bot):
 
 
 async def test_usage_message_on_bad_args(fake_bot):
-    async def pay(update, amount: int):
+    async def pay(update, amount: Arg[int]):
         raise AssertionError("must not run")
 
     reg = Registration(kind="command", fn=pay, name="pay", command="pay")
