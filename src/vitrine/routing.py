@@ -80,7 +80,8 @@ def split_docstring(fn: Callable[..., Any]) -> tuple[str, str]:
     return summary, detail
 
 
-Kind = Literal["command", "callback", "message"]
+#: "hook": run through the pipeline by the framework itself, no transport
+Kind = Literal["command", "callback", "message", "hook"]
 
 
 @dataclass

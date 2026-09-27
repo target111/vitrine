@@ -30,6 +30,7 @@ from telegram import Update
 from telegram.request import BaseRequest, RequestData
 
 from .callbacks import CallbackData
+from .screens import _SEND_METHODS
 
 if TYPE_CHECKING:
     from telegram.ext import Application
@@ -58,15 +59,10 @@ class ApiCall:
         return value
 
 
+#: Bot API method -> media kind, e.g. "sendVideoNote" -> "video_note"
 _MEDIA_SENDS = {
-    "sendPhoto": "photo",
-    "sendVideo": "video",
-    "sendAnimation": "animation",
-    "sendDocument": "document",
-    "sendAudio": "audio",
-    "sendVoice": "voice",
-    "sendVideoNote": "video_note",
-    "sendSticker": "sticker",
+    "".join(part.title() if i else part for i, part in enumerate(method.split("_"))): kind
+    for kind, (method, _) in _SEND_METHODS.items()
 }
 
 
@@ -361,7 +357,7 @@ class TestClient:
 
     def texts(self) -> list[str]:
         """Every text and caption the bot sent or edited in, in order."""
-        return [call.text for call in self.requests if call.text is not None]
+        return sent_texts(self.requests)
 
     def last_text(self) -> str | None:
         texts = self.texts()

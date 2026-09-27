@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, TypeAlias, TypeVar, get_args, get_origin
 
 from .exceptions import ConfigurationError, UsageError
+from .injection import _resolve_lax
 
 T = TypeVar("T")
 
@@ -113,21 +114,15 @@ def _evaluate(fn: Callable[..., Any], param: inspect.Parameter) -> Any:
     exist at runtime to convert anything.
     """
     annotation = param.annotation
-    if not isinstance(annotation, str):
-        return annotation
-
-    try:
-        # globals only: builtins come along automatically
-        return eval(annotation, getattr(fn, "__globals__", {}))  # noqa: S307
-    except Exception as exc:
-        if _ARG_SPELLING.search(annotation):
-            raise ConfigurationError(
-                f"{fn.__name__}: cannot resolve the annotation {annotation!r} of command "
-                f"argument {param.name!r}. An argument is converted by calling its "
-                f"type, so it has to be importable at runtime -- not only under "
-                f"TYPE_CHECKING."
-            ) from exc
-        return None
+    value = _resolve_lax(annotation, fn)
+    if value is None and isinstance(annotation, str) and _ARG_SPELLING.search(annotation):
+        raise ConfigurationError(
+            f"{fn.__name__}: cannot resolve the annotation {annotation!r} of command "
+            f"argument {param.name!r}. An argument is converted by calling its "
+            f"type, so it has to be importable at runtime -- not only under "
+            f"TYPE_CHECKING."
+        )
+    return value
 
 
 @dataclass(frozen=True)

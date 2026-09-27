@@ -64,7 +64,6 @@ first screen has gone out.
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -76,7 +75,6 @@ from telegram.ext import BaseHandler
 from .callbacks import CallbackData
 from .dispatch import Dispatch
 from .exceptions import ConfigurationError
-from .injection import unresolvable_params
 from .middleware import Middleware
 from .routing import (
     Registration,
@@ -85,8 +83,6 @@ from .routing import (
     validate_command_name,
 )
 from .screens import Screen
-
-logger = logging.getLogger("vitrine.conversations")
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -120,19 +116,6 @@ def _exit_reason(outcome: Any) -> ExitReason | None:
     if outcome is CANCEL:
         return ExitReason.CANCELLED
     return None
-
-
-class _Verdict:
-    """A step's outcome, as validated inside the pipeline.
-
-    Only the step's own result fills it, so a middleware that answers without
-    calling ``call_next`` -- whatever it returns -- means no transition.
-    """
-
-    __slots__ = ("outcome",)
-
-    def __init__(self) -> None:
-        self.outcome: Any = None
 
 
 class _Step:
@@ -346,8 +329,7 @@ class Conversation:
         """The live run for a caller as ``(state_name, state)``, or None."""
         if self._handler is None:
             return None
-        key = (chat_id if self.per_chat else None, user_id if self.per_user else None)
-        run = self._handler.runs.get(key)
+        run = self._handler.runs.get(self._key_of(chat_id, user_id))
         return (run.state_name, run.state) if run is not None else None
 
     # -- building -------------------------------------------------------------
@@ -361,7 +343,6 @@ class Conversation:
                 name for step in self._steps for name in step.states if name != ANY_STATE
             )
         )
-        self._validate_exit_hook(dispatch)
 
         entries: list[_Mounted] = []
         states: dict[str, list[_Mounted]] = {name: [] for name in state_names}
@@ -393,29 +374,18 @@ class Conversation:
         exit_reg = None
         if self._exit_hook is not None:
             exit_reg = Registration(
-                kind="message",
+                kind="hook",
                 fn=self._exit_hook,
                 name=f"{self.name}.on_exit",
                 middlewares=middlewares,
             )
+            dispatch.validate(exit_reg, extra_names={"reason"})
 
         # A Conversation belongs to one bot: building again rebinds it.
         self._handler = ConversationDispatcher(
             self, dispatch, entries, states, fallbacks, exit_reg
         )
         return self._handler
-
-    def _validate_exit_hook(self, dispatch: Dispatch) -> None:
-        if self._exit_hook is None:
-            return
-
-        extra = {"reason"} | ({dispatch.auth.name} if dispatch.auth else set())
-        bad = unresolvable_params(self._exit_hook, dispatch.providers, extra_names=extra)
-        if bad:
-            raise ConfigurationError(
-                f"conversation {self.name!r}: exit hook declares parameter(s) "
-                f"{bad} that nothing can supply"
-            )
 
     def key(self, update: Any) -> tuple[int | None, int | None] | None:
         """Whose run an update belongs to: (chat, user), per ``per_chat``/``per_user``."""
@@ -425,10 +395,12 @@ class Conversation:
             return None
         if self.per_user and user is None:
             return None
-        return (
-            chat.id if self.per_chat and chat is not None else None,
-            user.id if self.per_user and user is not None else None,
-        )
+        return self._key_of(getattr(chat, "id", None), getattr(user, "id", None))
+
+    def _key_of(
+        self, chat_id: int | None, user_id: int | None
+    ) -> tuple[int | None, int | None]:
+        return (chat_id if self.per_chat else None, user_id if self.per_user else None)
 
 
 async def _unused_callback(update: Any, context: Any) -> None:
@@ -480,7 +452,9 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
 
     # -- PTB handler protocol ----------------------------------------------------
 
-    def check_update(self, update: object) -> tuple[_Mounted, object] | None:
+    def check_update(
+        self, update: object
+    ) -> tuple[tuple[int | None, int | None], _Mounted, object] | None:
         if not isinstance(update, Update):
             return None
         if update.channel_post or update.edited_channel_post:
@@ -496,13 +470,13 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
             return None
 
         run = self.runs.get(key)
-        candidates = self.entries if run is None else self.states[run.state_name]
-        if run is not None:
-            candidates = [*candidates, *self.fallbacks]
+        candidates = (
+            self.entries if run is None else [*self.states[run.state_name], *self.fallbacks]
+        )
         for mounted in candidates:
             check = mounted.handler.check_update(update)
             if check is not None and check is not False:
-                return mounted, check
+                return key, mounted, check
 
         return None
 
@@ -514,14 +488,12 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
         context: Any,
     ) -> None:
         assert isinstance(check_result, tuple)
-        mounted, inner_check = check_result
+        key, mounted, inner_check = check_result
         # what the step's own PTB handler would add: context.args, regex matches
         mounted.handler.collect_additional_context(
             context, update, application, inner_check
         )
 
-        key = self.conv.key(update)
-        assert key is not None
         if mounted.step.is_entry:
             await self._enter(key, mounted, update, context)
         else:
@@ -540,15 +512,14 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
         # peers are left alone -- until the result shows a run really started.
         factory = self.conv.state_factory
         state = factory() if factory is not None else None
-        verdict = _Verdict()
-        await self.dispatch.run(
+        # None too when a middleware answered without calling the step
+        outcome = await self.dispatch.run(
             mounted.reg,
             update,
             context,
             state=state,
-            on_result=self._interpret(update, verdict),
+            on_result=self._interpret(update),
         )
-        outcome = verdict.outcome
         if outcome is None:
             return
 
@@ -577,15 +548,14 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
             return
         run.update, run.context = update, context
 
-        verdict = _Verdict()
-        await self.dispatch.run(
+        # None too when a middleware answered without calling the step
+        outcome = await self.dispatch.run(
             mounted.reg,
             update,
             context,
             state=run.state,
-            on_result=self._interpret(update, verdict),
+            on_result=self._interpret(update),
         )
-        outcome = verdict.outcome
         if self.runs.get(key) is not run:
             return  # ended while the step ran
 
@@ -599,7 +569,7 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
             run.state_name = outcome
         self._arm(key, run)
 
-    def _interpret(self, update: Any, verdict: _Verdict) -> Callable[[Any], Awaitable[Any]]:
+    def _interpret(self, update: Any) -> Callable[[Any], Awaitable[Any]]:
         """Inside the pipeline: validate a step's result and render its screen."""
 
         async def interpret(result: Any) -> Any:
@@ -620,7 +590,6 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
                 )
             if screen is not None:
                 await self.dispatch.delivery.render(update, screen)
-            verdict.outcome = outcome
             return outcome
 
         return interpret

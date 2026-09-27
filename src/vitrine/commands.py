@@ -358,8 +358,12 @@ class CommandMenus:
                 # tell "never written" from "written by an earlier process"
                 deletes = listed - set(desired)
 
+            digests: dict[int, str] = {}  # chats share menu lists: hash each once
             for chat_id in sorted(writes):
-                digest = fingerprint(desired[chat_id])
+                menu = desired[chat_id]
+                digest = digests.get(id(menu))
+                if digest is None:
+                    digest = digests[id(menu)] = fingerprint(menu)
                 if published.get(chat_id) == digest:
                     self._seed.discard(chat_id)
                     continue

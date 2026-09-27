@@ -100,10 +100,7 @@ class ErrorRegistry:
             return
 
         if isinstance(result, Screen) and inv.update is not None:
-            if inv.delivery is not None:
-                await inv.delivery.render(inv.update, result)
-            elif inv.context is not None:
-                await result.render(inv.update, inv.context)
+            await inv.delivery.render(inv.update, result)
 
     async def _last_resort(self, error: BaseException, inv: Invocation) -> None:
         logger.exception("unhandled error in %s", inv.handler_name, exc_info=error)

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from typing import Any
 
 from telegram.error import TelegramError
@@ -107,8 +107,10 @@ class Dispatch:
 
         return cached
 
-    def validate(self, reg: Registration) -> None:
+    def validate(self, reg: Registration, extra_names: Iterable[str] = ()) -> None:
         """Build-time check: every handler param must have a source.
+
+        ``extra_names`` are injected per run (``run(extras=...)``).
 
         Also reports annotations that provably disagree with their provider:
         a warning on the ``vitrine.build`` logger, or a build failure under
@@ -122,8 +124,9 @@ class Dispatch:
                 f"only commands have a command line to parse"
             )
 
-        extra = {self.auth.name} if self.auth else set()
-        extra = extra | {spec.name for spec in specs}
+        extra = {*extra_names, *(spec.name for spec in specs)}
+        if self.auth:
+            extra.add(self.auth.name)
 
         bad = unresolvable_params(reg.fn, self.providers, extra_names=extra)
         if bad:
@@ -164,7 +167,11 @@ class Dispatch:
         on_result: ResultHandler | None = None,
         answer_query: bool = True,
     ) -> Any:
-        """Run one handler; returns ``on_result``'s value, or None on failure."""
+        """Run one handler; returns ``on_result``'s value.
+
+        None when the handler never completed: it failed, was throttled, or a
+        middleware answered without calling ``call_next``.
+        """
         started = time.monotonic()
         inv = self.invocation(reg.name, update, context)
         inv.state = state
@@ -192,8 +199,10 @@ class Dispatch:
         )
         inv.event = event
         handle_result = on_result or self._render_screen(update)
+        produced: Any = None
 
         async def core(evt: Event) -> Any:
+            nonlocal produced
             if self.auth is not None and has_guards(reg.fn):
                 principal = await self.auth.resolve(inv, self.providers)
                 self.auth.check(reg.fn, principal)
@@ -202,7 +211,7 @@ class Dispatch:
             if spec is not None:
                 await self.limiter.enforce(spec, evt)
 
-            specs = self.arg_specs(reg) if reg.kind == "command" else []
+            specs = self.arg_specs(reg)
             if specs:
                 assert reg.command is not None
                 inv.extras.update(parse_args(reg.command, specs, command_arg_text(update)))
@@ -212,13 +221,13 @@ class Dispatch:
             if hasattr(result, "__await__"):
                 result = await result
 
-            return await handle_result(result)
+            produced = await handle_result(result)
+            return produced
 
         chain = compose([*self.middlewares, *reg.middlewares], core)
         status = "ok"
-        result: Any = None
         try:
-            result = await chain(event)
+            await chain(event)
         except _Drop:
             status = "throttled"
         except Exception as exc:  # noqa: BLE001 - the error layer owns UX
@@ -240,7 +249,7 @@ class Dispatch:
                 status=status,
             )
 
-        return result
+        return produced
 
     def _render_screen(self, update: Any) -> ResultHandler:
         async def render(result: Any) -> Any:

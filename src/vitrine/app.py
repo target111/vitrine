@@ -352,8 +352,8 @@ class Bot(Generic[P]):
         """Validate every registration and turn it into PTB handlers, in order."""
         flat = list(self.router.walk())
         mounted = list(self.router.walk_conversations())
-        conv_regs = [reg for conv, _ in mounted for reg in conv.command_registrations()]
         conv_entries = [reg for conv, _ in mounted for reg in conv.entry_registrations()]
+        conv_regs = [reg for reg in conv_entries if reg.kind == "command"]
 
         if self._help_command and not any(
             reg.kind == "command" and reg.command == "help" for reg in (*flat, *conv_regs)
@@ -422,8 +422,7 @@ class Bot(Generic[P]):
                 # invisible answers exactly like nonexistent
                 return command_discovery.unknown_command_screen(command)
 
-            assert self._dispatch is not None
-            specs = self._dispatch.arg_specs(reg)
+            specs = self._built().arg_specs(reg)
             return command_discovery.command_detail_screen(reg, specs)
 
         return Registration(
@@ -446,14 +445,13 @@ class Bot(Generic[P]):
             chat = getattr(update, "effective_chat", None)
             if chat is not None:
                 resolved = await self._resolve_scope_chats()
-                scopes |= {name for name, ids in resolved.items() if chat.id in set(ids)}
+                scopes |= {name for name, ids in resolved.items() if chat.id in ids}
             return scopes
 
         named = {reg.scope for reg in self._registrations if reg.kind == "command"}
         principal: P | None = None
         if self.auth is not None:
-            assert self._dispatch is not None
-            inv = self._dispatch.invocation("help", update, context)
+            inv = self._built().invocation("help", update, context)
             try:
                 principal = await self.auth.resolve(inv, self.providers)
             finally:
@@ -472,8 +470,8 @@ class Bot(Generic[P]):
 
     async def _ban_gate(self, update: Any, context: Any) -> None:
         """Bot-wide ban enforcement, before any handler in any group."""
-        assert self.auth is not None and self._dispatch is not None
-        inv = self._dispatch.invocation("ban-gate", update, context)
+        assert self.auth is not None
+        inv = self._built().invocation("ban-gate", update, context)
         try:
             principal = await self.auth.resolve(inv, self.providers)
         except Exception:
