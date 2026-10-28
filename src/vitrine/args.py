@@ -108,10 +108,11 @@ def argument_type(annotation: Any) -> Any:
 def _evaluate(fn: Callable[..., Any], param: inspect.Parameter) -> Any:
     """``param``'s annotation as an object; ``None`` if it cannot be evaluated.
 
-    Under PEP 563 annotations are strings. A string that cannot be evaluated
-    is almost always a TYPE_CHECKING-only import on an injected parameter,
-    which is fine -- unless it is spelled as an argument, whose type has to
-    exist at runtime to convert anything.
+    Under PEP 563 annotations are strings, evaluated against the function's
+    module globals. A string that cannot be evaluated is almost always a
+    TYPE_CHECKING-only import (or a type local to a function) on an injected
+    parameter, which is fine -- unless it is spelled as an argument, whose type
+    has to exist at runtime to convert anything.
     """
     annotation = param.annotation
     value = _resolve_lax(annotation, fn)
@@ -119,7 +120,8 @@ def _evaluate(fn: Callable[..., Any], param: inspect.Parameter) -> Any:
         raise ConfigurationError(
             f"{fn.__name__}: cannot resolve the annotation {annotation!r} of command "
             f"argument {param.name!r}. An argument is converted by calling its "
-            f"type, so it has to be importable at runtime -- not only under "
+            f"type, so the type has to resolve at runtime: define it at module "
+            f"level, not inside a function, and don't import it only under "
             f"TYPE_CHECKING."
         )
     return value

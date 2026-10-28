@@ -244,6 +244,35 @@ async def test_stopping_the_bot_cancels_pending_timeouts():
     assert exits == []
 
 
+async def test_stopping_the_bot_cancels_a_timeout_exit_hook_in_progress():
+    hook: list[str] = []
+    conv = Conversation("t_slow_bye", timeout=0.02)
+
+    @conv.entry(command="slow_bye")
+    async def start():
+        return "s"
+
+    @conv.state("s")
+    async def s(): ...
+
+    @conv.on_exit
+    async def on_exit():
+        hook.append("started")
+        try:
+            await asyncio.sleep(10)  # slow cleanup I/O
+        except asyncio.CancelledError:
+            hook.append("cancelled")
+            raise
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/slow_bye")
+        await asyncio.sleep(0.1)
+        assert hook == ["started"]
+    await asyncio.sleep(0)
+
+    assert hook == ["started", "cancelled"]
+
+
 # ---------------------------------------------------- errors stay in the pipeline
 
 
@@ -431,8 +460,12 @@ def build_menu_conv() -> Conversation:
     return conv
 
 
+def entry_commands(conv: Conversation):
+    return [reg for reg in conv.entry_registrations() if reg.kind == "command"]
+
+
 def test_entry_commands_are_discoverable():
-    regs = build_menu_conv().command_registrations()
+    regs = entry_commands(build_menu_conv())
 
     assert len(regs) == 1  # the button entry has no command
     assert regs[0].command == "order"
@@ -451,7 +484,7 @@ def test_an_entry_description_falls_back_to_the_docstring():
         The rest of the docstring is not the description.
         """
 
-    assert conv.command_registrations()[0].description == "Place an order."
+    assert entry_commands(conv)[0].description == "Place an order."
 
 
 def test_a_blank_docstring_leaves_the_description_empty():
@@ -461,11 +494,11 @@ def test_a_blank_docstring_leaves_the_description_empty():
     async def start():
         """ """
 
-    assert conv.command_registrations()[0].description == ""
+    assert entry_commands(conv)[0].description == ""
 
 
 def test_in_run_commands_are_not_discoverable():
-    commands = {reg.command for reg in build_menu_conv().command_registrations()}
+    commands = {reg.command for reg in build_menu_conv().entry_registrations()}
 
     assert "skip" not in commands and "cancel" not in commands
 

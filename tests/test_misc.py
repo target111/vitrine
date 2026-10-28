@@ -140,6 +140,11 @@ def test_an_argument_type_must_be_importable_at_runtime():
         build_arg_specs(deferred_annotations.unresolvable_argument)
 
 
+def test_an_argument_type_local_to_a_function_is_named_as_the_cause():
+    with pytest.raises(ConfigurationError, match="module level.*inside a function"):
+        build_arg_specs(deferred_annotations.local_argument_type())
+
+
 def test_bool_conversion():
     spec = [ArgSpec("flag", bool, True, False)]
     assert parse_args("t", spec, "yes") == {"flag": True}

@@ -21,3 +21,16 @@ async def note(update: Update, tag: Arg[str], amount: Arg[int], rest: Greedy = G
 
 async def unresolvable_argument(update: Update, target: Arg[Update]):
     """``target`` is a command argument whose own type is TYPE_CHECKING-only."""
+
+
+def local_argument_type():
+    """A handler whose argument type is defined inside the function that builds it."""
+    from enum import Enum
+
+    class Color(Enum):
+        RED = "red"
+
+    async def paint(color: Arg[Color]):
+        """``Color`` is not a module global, so the string can't be evaluated."""
+
+    return paint

@@ -302,16 +302,12 @@ class Conversation:
         self._exit_hook = fn
         return fn
 
-    def command_registrations(self) -> list[Registration]:
-        """Entry commands as discoverable registrations (``/help``, menus).
-
-        Only entries: a state's ``/skip`` or the ``/cancel`` fallback do
-        nothing outside a live run.
-        """
-        return [reg for reg in self.entry_registrations() if reg.kind == "command"]
-
     def entry_registrations(self) -> list[Registration]:
-        """Every entry point -- command, callback or message -- as a registration."""
+        """Every entry point -- command, callback or message -- as a registration.
+
+        Only entries: a state's ``/skip`` or the ``/cancel`` command do nothing
+        outside a live run, so they stay out of ``/help`` and the menus.
+        """
         return [step.registration(self.name) for step in self._steps if step.is_entry]
 
     # -- runtime inspection ------------------------------------------------------
@@ -439,6 +435,8 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
         self.dispatch = dispatch
         self.flows = flows
         self.runs: dict[tuple[int, int], _Run] = {}
+        #: timers running an exit hook: out of ``runs``, still cancellable by close()
+        self._expiring: set[asyncio.Task[None]] = set()
         for flow in flows:
             flow.dispatcher = self
 
@@ -652,9 +650,17 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
         await asyncio.sleep(timeout)
         if self.runs.get(key) is not run:
             return
+        timer = run.timer
+        assert timer is not None
         run.timer = None  # this task is the timer: don't cancel it
         del self.runs[key]
-        await self._exit(run.flow, run.update, run.context, run.state, ExitReason.TIMEOUT)
+        self._expiring.add(timer)
+        try:
+            await self._exit(
+                run.flow, run.update, run.context, run.state, ExitReason.TIMEOUT
+            )
+        finally:
+            self._expiring.discard(timer)
 
     def _forget(self, key: tuple[int, int]) -> None:
         run = self.runs.pop(key, None)
@@ -662,8 +668,11 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
             run.timer.cancel()
 
     def close(self) -> None:
-        """Cancel every pending timeout (bot shutdown); runs are in-memory only."""
+        """Cancel every pending timeout and running timeout exit hook (bot
+        shutdown); runs are in-memory only."""
         for run in self.runs.values():
             if run.timer is not None:
                 run.timer.cancel()
         self.runs.clear()
+        for timer in self._expiring:
+            timer.cancel()
