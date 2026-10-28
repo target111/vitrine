@@ -591,6 +591,38 @@ async def test_a_clear_the_store_missed_is_retried_next_sync(fake_bot):
     assert set(store.data) == {1}
 
 
+async def test_a_menu_the_store_missed_is_rewritten_when_it_changes_back(fake_bot):
+    """Promoted, the store misses it, demoted: the record still names the old
+    menu, but Telegram holds the new one, so it must be rewritten."""
+    store = FlakyStore()
+    menus = CommandMenus(store=store)
+    await menus.sync(fake_bot, REGS, scopes(admin=[1]))
+    store.down = {1}
+    await menus.sync(fake_bot, REGS, scopes(admin=[1], vip=[1]), chats=[1])
+    store.down = set()
+    fake_bot.calls.clear()
+
+    await menus.sync(fake_bot, REGS, scopes(admin=[1]), chats=[1])
+
+    assert chat_writes(fake_bot) == {1: ["start", "ban"]}
+
+
+async def test_a_clear_the_store_missed_is_rewritten_when_the_chat_rejoins(fake_bot):
+    """Removed, the store misses it, re-added with the same scopes: the record
+    still names the menu, but Telegram cleared it, so it must be rewritten."""
+    store = FlakyStore()
+    menus = CommandMenus(store=store)
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2]))
+    store.down = {2}
+    await menus.sync(fake_bot, REGS, scopes(admin=[1]), chats=[2])
+    store.down = set()
+    fake_bot.calls.clear()
+
+    await menus.sync(fake_bot, REGS, scopes(admin=[1, 2]), chats=[2])
+
+    assert chat_writes(fake_bot) == {2: ["start", "ban"]}
+
+
 # ------------------------------------------------------------ flood control
 
 

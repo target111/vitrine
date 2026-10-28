@@ -381,9 +381,10 @@ class CommandMenus:
                 try:
                     await self.store.set(chat_id, digest)
                 except Exception as exc:  # noqa: BLE001
-                    # it holds a menu the store doesn't know of: rewrite or clear
-                    # it next sync, whichever it needs then
+                    # it holds a menu the record doesn't name: forget the record
+                    # so the next sync rewrites or clears it, whichever it needs
                     logger.warning("could not record the menu of chat %s: %s", chat_id, exc)
+                    published.pop(chat_id, None)
                     self._seed.add(chat_id)
                 else:
                     published[chat_id] = digest
@@ -403,8 +404,11 @@ class CommandMenus:
                 try:
                     await self.store.discard(chat_id)
                 except Exception as exc:  # noqa: BLE001
-                    # still on record, so the next full sync clears it again
+                    # the record names a menu it no longer holds: forget it here,
+                    # and the seed has the next full sync clear it again
                     logger.warning("could not forget the menu of chat %s: %s", chat_id, exc)
+                    published.pop(chat_id, None)
+                    self._seed.add(chat_id)
                 else:
                     published.pop(chat_id, None)
                     self._seed.discard(chat_id)
