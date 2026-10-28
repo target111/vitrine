@@ -141,7 +141,7 @@ class Bot(Generic[P]):
         self._dispatch: Dispatch | None = None
         self._transports: tuple[BaseRequest | None, BaseRequest | None] = (None, None)
         self._registrations: list[Registration] = []
-        self._conversations: list[ConversationDispatcher] = []
+        self._conversations: ConversationDispatcher | None = None
 
         # set by startup()
         self._supervisor: WorkerSupervisor | None = None
@@ -366,10 +366,10 @@ class Bot(Generic[P]):
 
         for reg in flat:
             dispatch.validate(reg)
-        self._conversations = [conv.build(dispatch, mws) for conv, mws in mounted]
-        exclusive = [d for d in self._conversations if d.conv.exclusive]
-        for d in exclusive:
-            d.peers = [peer for peer in exclusive if peer is not d]
+        conversations = ConversationDispatcher(
+            dispatch, [conv.build(dispatch, mws) for conv, mws in mounted]
+        )
+        self._conversations = conversations
 
         def wire(regs: list[Registration]) -> list[tuple[BaseHandler, int]]:
             return [
@@ -378,14 +378,14 @@ class Bot(Generic[P]):
 
         # PTB runs the first matching handler of each group. Within a group:
         #   1. reply-keyboard presses -- navigation works from anywhere;
-        #   2. conversations -- entry points and a live run's steps see their
-        #      updates before any general-purpose handler does;
+        #   2. conversations -- a live run's steps, then every entry point,
+        #      before any general-purpose handler;
         #   3. every other handler, in registration order, then raw handlers;
         #   4. the catch-all that answers presses nothing claimed. Telegram takes
         #      one answer per press, so callback handlers belong in group 0.
         return [
             *wire([reg for reg in flat if reg.reply_button]),
-            *((d, 0) for d in self._conversations),
+            (conversations, 0),
             *wire([reg for reg in flat if not reg.reply_button]),
             *self.router.walk_raw(),
             (CallbackQueryHandler(_answer_stray), 0),
@@ -530,8 +530,8 @@ class Bot(Generic[P]):
         if self._supervisor is not None:
             await self._supervisor.stop()
             self._supervisor = None
-        for conversation in self._conversations:
-            conversation.close()
+        if self._conversations is not None:
+            self._conversations.close()
 
     async def shutdown(self) -> None:
         """Run shutdown hooks."""
@@ -613,8 +613,8 @@ def _check_reachable(
     PTB stops at the first match in a group, so a second handler for the same
     command -- or for a callback model an earlier handler takes unconditionally
     -- would silently never see an update. Conversation entries come before
-    the bot's other handlers in group 0 (see ``_compile``), and take a press
-    whenever the caller has no live run of theirs.
+    the bot's other handlers in group 0 (see ``_compile``), and are tried even
+    while the caller is mid-run.
     """
     commands: dict[tuple[int, str], str] = {}
     for reg in [*flat, *conv_entries]:
@@ -634,19 +634,10 @@ def _check_reachable(
             continue
         key_cb = (reg.group, reg.cb_model)
         if key_cb in takes_all:
-            first = takes_all[key_cb]
-            model = reg.cb_model.__name__
-            if any(first is entry for entry in conv_entries):
-                raise ConfigurationError(
-                    f"callback handler {reg.name!r} would only see {model} presses "
-                    f"from callers mid-conversation: entry {first.name!r} takes "
-                    f"every other one, and conversations come first (narrow the "
-                    f"entry with when=)"
-                )
             raise ConfigurationError(
-                f"callback handler {reg.name!r} can never run: {first.name!r} "
-                f"already takes every {model} press in its group "
-                f"(narrow it with when=)"
+                f"callback handler {reg.name!r} can never run: "
+                f"{takes_all[key_cb].name!r} already takes every "
+                f"{reg.cb_model.__name__} press in its group (narrow it with when=)"
             )
         if reg.cb_when is None:
             takes_all[key_cb] = reg

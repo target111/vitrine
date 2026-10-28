@@ -1,4 +1,4 @@
-"""Conversations end to end: runs, transitions, exits, timeouts, exclusivity."""
+"""Conversations end to end: runs, transitions, exits, timeouts, one run per caller."""
 
 from __future__ import annotations
 
@@ -38,6 +38,10 @@ class StopCB(CallbackData, prefix="t_conv_stop"):
 
 class SplitCB(CallbackData, prefix="t_split"):
     kind: str
+
+
+class YesCB(CallbackData, prefix="t_yes"):
+    pass
 
 
 def make_bot(*convs: Conversation, **kwargs) -> Bot:
@@ -116,30 +120,6 @@ async def test_a_run_lives_in_its_chat_by_default():
         await client.send("/order", chat_id=-100)
         assert live(conv, chat=-100) is not None
         assert live(conv, chat=42) is None
-
-
-async def test_per_chat_false_follows_the_user_across_chats():
-    conv = Conversation("t_follow", OrderState, per_chat=False)
-
-    @conv.entry(command="follow")
-    async def start():
-        return "item"
-
-    @conv.state("item")
-    async def got(state: OrderState, update):
-        state.item = update.effective_message.text
-        return END
-
-    async with TestClient(make_bot(conv)) as client:
-        await client.send("/follow", chat_id=-100)
-        await client.send("from elsewhere", chat_id=-200)
-
-    assert conv.active(user_id=42) is None  # finished in the other chat
-
-
-def test_per_chat_and_per_user_cannot_both_be_off():
-    with pytest.raises(ConfigurationError, match="both"):
-        Conversation("t_nobody", per_chat=False, per_user=False)
 
 
 async def test_cancel_runs_exit_hook_with_cancelled():
@@ -668,12 +648,12 @@ def test_a_built_conversation_is_frozen():
         async def late(): ...
 
 
-# -------------------------------------------------------------------- exclusivity
+# ------------------------------------------------------------ one run per caller
 
 
-def build_exclusive(name: str, *, exclusive: bool = True, timeout: float | None = 60):
+def build_peer(name: str, *, timeout: float | None = 60):
     exits: list[ExitReason] = []
-    conv = Conversation(name, OrderState, timeout=timeout, exclusive=exclusive)
+    conv = Conversation(name, OrderState, timeout=timeout)
 
     @conv.entry(command=name)
     async def start():
@@ -690,9 +670,9 @@ def build_exclusive(name: str, *, exclusive: bool = True, timeout: float | None 
     return conv, exits
 
 
-async def test_entering_an_exclusive_run_ends_the_other_one():
-    first, first_exits = build_exclusive("t_first", timeout=0.05)
-    second, _ = build_exclusive("t_second")
+async def test_starting_a_conversation_cancels_the_callers_other_run():
+    first, first_exits = build_peer("t_first", timeout=0.05)
+    second, _ = build_peer("t_second")
 
     async with TestClient(make_bot(first, second)) as client:
         await client.send("/t_first")
@@ -704,27 +684,27 @@ async def test_entering_an_exclusive_run_ends_the_other_one():
         assert first_exits == [ExitReason.CANCELLED]
 
 
-async def test_a_non_exclusive_run_is_left_alone():
-    quiet, quiet_exits = build_exclusive("t_quiet", exclusive=False)
-    loud, _ = build_exclusive("t_loud")
-
-    async with TestClient(make_bot(quiet, loud)) as client:
-        await client.send("/t_quiet")
-        await client.send("/t_loud")
-
-        assert quiet_exits == []
-        assert live(quiet) is not None
-
-
 async def test_other_callers_runs_are_left_alone():
-    first, first_exits = build_exclusive("t_mine")
-    second, _ = build_exclusive("t_yours")
+    first, first_exits = build_peer("t_mine")
+    second, _ = build_peer("t_yours")
 
     async with TestClient(make_bot(first, second)) as client:
         await client.send("/t_mine")
         await client.send("/t_yours", user_id=7, chat_id=7)
 
     assert first_exits == []
+
+
+async def test_the_callers_run_in_another_chat_is_left_alone():
+    private, private_exits = build_peer("t_private")
+    group, _ = build_peer("t_group")
+
+    async with TestClient(make_bot(private, group)) as client:
+        await client.send("/t_private")
+        await client.send("/t_group", chat_id=-100)
+
+        assert private_exits == []
+        assert live(private) is not None and live(group, chat=-100) is not None
 
 
 # ---------------------------------------------------------------- entry args
@@ -796,8 +776,8 @@ async def test_a_bare_screen_entry_leaves_no_trace():
 
 
 async def test_a_refused_entry_does_not_end_the_callers_other_runs():
-    running, running_exits = build_exclusive("t_victim")
-    picky = Conversation("t_picky", OrderState, exclusive=True)
+    running, running_exits = build_peer("t_victim")
+    picky = Conversation("t_picky", OrderState)
 
     @picky.entry(command="picky")
     async def start(sku: Arg[str]):
@@ -841,9 +821,9 @@ async def test_a_guard_refused_entry_leaves_no_trace():
 
 async def test_an_entry_returning_end_did_start_and_finish():
     """END counts: it ends peers and runs the exit hook, unlike a refusal."""
-    running, running_exits = build_exclusive("t_bg")
+    running, running_exits = build_peer("t_bg")
     finished_exits: list[ExitReason] = []
-    oneshot = Conversation("t_oneshot", OrderState, exclusive=True)
+    oneshot = Conversation("t_oneshot", OrderState)
 
     @oneshot.entry(command="oneshot")
     async def start():
@@ -867,7 +847,7 @@ async def test_an_entry_returning_end_did_start_and_finish():
 
 
 async def test_a_peers_goodbye_follows_the_new_flows_hello():
-    chatty = Conversation("t_chatty", OrderState, exclusive=True)
+    chatty = Conversation("t_chatty", OrderState)
 
     @chatty.entry(command="t_chatty")
     async def chatty_start():
@@ -881,7 +861,7 @@ async def test_a_peers_goodbye_follows_the_new_flows_hello():
     async def chatty_exit(reason, delivery, update):
         await delivery.send(update.effective_chat.id, Screen(text="goodbye"))
 
-    fresh = Conversation("t_fresh", OrderState, exclusive=True)
+    fresh = Conversation("t_fresh", OrderState)
 
     @fresh.entry(command="t_fresh")
     async def fresh_start():
@@ -894,6 +874,137 @@ async def test_a_peers_goodbye_follows_the_new_flows_hello():
     async with TestClient(make_bot(chatty, fresh)) as client:
         await client.send("/t_chatty")
         assert sent_texts(await client.send("/t_fresh")) == ["hello", "goodbye"]
+
+
+async def test_a_cancelled_peers_returned_screen_is_dropped():
+    """Rendered against the new flow's update, it would edit the pressed
+    message -- overwriting the new flow's first screen."""
+    exits: list[ExitReason] = []
+    old = Conversation("t_old", OrderState)
+
+    @old.entry(command="t_old")
+    async def old_start():
+        return "item", Screen(text="old flow")
+
+    @old.state("item")
+    async def old_item():
+        return END
+
+    @old.on_exit
+    async def old_exit(reason):
+        exits.append(reason)
+        return Screen(text="goodbye")
+
+    new = Conversation("t_new", OrderState)
+
+    @new.entry(callback=StopCB)
+    async def new_start():
+        return "item", Screen(text="hello")
+
+    @new.state("item")
+    async def new_item():
+        return END
+
+    async with TestClient(make_bot(old, new)) as client:
+        await client.send("/t_old")
+        assert sent_texts(await client.press(StopCB())) == ["hello"]
+
+        assert exits == [ExitReason.CANCELLED]
+        assert live(new) is not None
+
+
+async def test_re_entering_restarts_the_conversation():
+    exits: list[ExitReason] = []
+    conv = Conversation("t_again", OrderState)
+
+    @conv.entry(command="again")
+    async def start(state: OrderState):
+        return "item", Screen(text="what?")
+
+    @conv.state("item")
+    async def got_item(state: OrderState, update):
+        state.item = update.effective_message.text
+        return "qty"
+
+    @conv.state("qty")
+    async def got_qty():
+        return END
+
+    @conv.on_exit
+    async def on_exit(reason):
+        exits.append(reason)
+        return Screen(text="goodbye")
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/again")
+        await client.send("apples")
+        assert live(conv) == ("qty", OrderState(item="apples"))
+
+        assert sent_texts(await client.send("/again")) == ["what?"]
+        assert exits == [ExitReason.CANCELLED]
+        assert live(conv) == ("item", OrderState())
+
+
+async def test_a_refused_re_entry_leaves_the_run_alone():
+    conv = build_args_conv("t_again_args")
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/order ABC 3")
+        (usage,) = sent_texts(await client.send("/order"))
+
+        assert "sku" in usage
+        assert live(conv) == ("confirm", OrderState(item="ABC", qty=3))
+
+
+async def test_a_live_runs_step_beats_its_own_entry():
+    conv = Conversation("t_own", OrderState)
+
+    @conv.entry(command="own")
+    async def by_command():
+        return "confirm", Screen(text="sure?")
+
+    @conv.entry(callback=YesCB)
+    async def by_button():
+        return "confirm", Screen(text="sure?")
+
+    @conv.state("confirm", callback=YesCB)
+    async def confirm():
+        return END, Screen(text="confirmed")
+
+    async with TestClient(make_bot(conv)) as client:
+        await client.send("/own")
+        assert sent_texts(await client.press(YesCB())) == ["confirmed"]
+        assert live(conv) is None
+
+
+@pytest.mark.parametrize("survey_first", [False, True])
+async def test_a_live_runs_step_beats_another_conversations_entry(survey_first):
+    """Whichever was registered first: the run in progress answers its own button."""
+    order = Conversation("t_order_yes", OrderState)
+
+    @order.entry(command="order")
+    async def order_start():
+        return "confirm", Screen(text="place the order?")
+
+    @order.state("confirm", callback=YesCB)
+    async def order_yes():
+        return END, Screen(text="order placed")
+
+    survey = Conversation("t_survey_yes", OrderState)
+
+    @survey.entry(callback=YesCB)
+    async def survey_start():
+        return "q", Screen(text="survey started")
+
+    @survey.state("q")
+    async def survey_q():
+        return END
+
+    convs = (survey, order) if survey_first else (order, survey)
+    async with TestClient(make_bot(*convs)) as client:
+        await client.send("/order")
+        assert sent_texts(await client.press(YesCB())) == ["order placed"]
+        assert live(order) is None and live(survey) is None
 
 
 # ----------------------------------------------------- when= narrows, not swallows

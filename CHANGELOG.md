@@ -45,12 +45,23 @@ changes break existing code; each is listed under **Breaking** with its fix.
   `ConversationHandler.END`; return `END` (or `CANCEL`) from steps.
 - **Breaking:** registering anything after `build()` (or `run()`) raises
   `ConfigurationError` instead of being silently ignored.
+- **Breaking:** a caller has at most one live conversation run per chat:
+  starting any conversation cancels the caller's run in another one, as
+  `exclusive=True` used to. `exclusive`, `per_chat` and `per_user` are gone;
+  a run always belongs to one user in one chat. Drop the arguments. The
+  cancelled run's exit hook still runs, but a `Screen` it returns is dropped
+  so it can't overwrite the new flow's first screen.
+- Re-entering a conversation mid-run restarts it (the old run ends as
+  `CANCELLED`) instead of being silently ignored.
+- A live run's steps always see the caller's updates before any
+  conversation's entry points. Before, a conversation registered earlier
+  could start on a button press the live run was waiting for.
 - **Breaking:** passing both `scope_chats` and `scope_member` is a
   `ConfigurationError`. With `scope_chats`, `/help` shows a chat exactly the
   scopes its command menu carries.
 - Conversations run on vitrine's own state machine instead of wrapping PTB's
   `ConversationHandler`: one record per live run, no PTB internals.
-  `exclusive=True` works on any PTB version. Steps' screens, result
+  Steps' screens, result
   validation and exit hooks now run inside the pipeline, so they get error
   UX, middleware and the per-update log line.
 - One dependency scope per update: the ban gate, every handler group,

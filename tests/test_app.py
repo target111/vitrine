@@ -197,15 +197,15 @@ async def test_conversation_entry_commands_are_published_to_telegram():
     assert [c["command"] for c in published.params["commands"]] == ["help", "order"]
 
 
-# ------------------------------------------------------------------ exclusivity
+# ------------------------------------------------------------ one run per caller
 
 
-async def test_exclusive_conversations_are_linked_across_routers():
+async def test_conversations_are_linked_across_routers():
     """Peers are found bot-wide: a sub-router's flow still ends the other one."""
     bot = make_bot()
     exits: list[ExitReason] = []
 
-    top = Conversation("t_top", exclusive=True)
+    top = Conversation("t_top")
 
     @top.entry(command="top")
     async def top_start():
@@ -219,7 +219,7 @@ async def test_exclusive_conversations_are_linked_across_routers():
         exits.append(reason)
 
     sub_router = Router("sub")
-    nested = Conversation("t_nested", exclusive=True)
+    nested = Conversation("t_nested")
 
     @nested.entry(command="nested")
     async def nested_start():

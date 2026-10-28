@@ -194,7 +194,7 @@ async def pay(user: User, wallet: WalletService, amount: Arg[float], note: Greed
 PTB runs the first matching handler in each group. vitrine orders group 0 explicitly:
 
 1. reply-keyboard buttons (`@bot.reply_button`) -- navigation works from anywhere, even mid-conversation;
-2. conversations -- their entry points, and a caller's live run, see updates before any general handler, so a catch-all `@bot.message()` can't swallow the answer a step is waiting for, and a conversation's `/cancel` wins over a bot-wide `/cancel` only while a run is live;
+2. conversations -- a caller's live run, then every entry point, see updates before any general handler, so a catch-all `@bot.message()` can't swallow the answer a step is waiting for, and a conversation's `/cancel` wins over a bot-wide `/cancel` only while a run is live;
 3. every other handler, in registration order, then raw handlers;
 4. a catch-all that answers button presses nothing claimed.
 
@@ -210,7 +210,7 @@ Handlers that could never run fail the build: the same command registered twice,
 | Routers | `routing` | `@router.command/callback/message`, sub-routers, `router.raw()` for plain PTB handlers. Edited messages are ignored by default -- an edit redelivers the whole message and would re-run handlers -- with `edits=True` to opt a handler in. See *Handler precedence* above. |
 | Command args | `args` | Explicit `Arg[T]` / `Greedy` parameters; required/optional/greedy; auto usage messages; everything else is injected. |
 | Pagination | `pagination` | Implement `count()`/`fetch(offset, limit)`, use `Paginator` and `nav_row()` buttons. |
-| Conversations | `conversations` | Dataclass state per run, string transitions, timeout, `on_exit(reason)` hooks (which may return a goodbye `Screen`). Steps return a state, `END` (finished), `CANCEL` (cancelled) or `None` (stay), optionally with a `Screen`. Entry commands land in `/help` and take `Arg[...]` arguments (bad args → usage line, and the run never starts); an entry that starts no run leaves no trace; `ANY_STATE` mounts one step on every state; `command="skip"` is valid only inside its state; `when=` narrows a step without swallowing the press; `exclusive=True` ends the caller's other runs *after* the new flow's first screen. Steps, their screens and exit hooks all run through the pipeline: DI, middleware, guards, error UX. `conv.active(chat_id=..., user_id=...)` inspects a live run. |
+| Conversations | `conversations` | Dataclass state per run, string transitions, timeout, `on_exit(reason)` hooks (which may return a goodbye `Screen`). Steps return a state, `END` (finished), `CANCEL` (cancelled) or `None` (stay), optionally with a `Screen`. Entry commands land in `/help` and take `Arg[...]` arguments (bad args → usage line, and the run never starts); an entry that starts no run leaves no trace; `ANY_STATE` mounts one step on every state; `command="skip"` is valid only inside its state; `when=` narrows a step without swallowing the press; a caller has one live run per chat: its current state's steps get first look at their updates, whatever order conversations were registered in, and an update they don't take can start a conversation -- another one, or the same one again from the top. The new run replaces the old one *after* its first screen, dropping any goodbye `Screen` the old run's exit hook returns. Steps, their screens and exit hooks all run through the pipeline: DI, middleware, guards, error UX. `conv.active(chat_id=..., user_id=...)` inspects a live run. |
 | Files/media | `media` | `download()` with timeout and cleanup; content-hash `file_id` cache shared with Screen rendering. |
 | Rate limiting | `ratelimit` | `@throttle(3, per=60)`, custom keys and custom behavior on limits. |
 | Logging | `logging` | Key=value format, one line per update, `audit()` convention. |
@@ -222,7 +222,7 @@ Handlers that could never run fail the build: the same command registered twice,
 
 `examples/shop/` is a full app: a storefront with a **domain layer that never touches the bot layer** (`domain/`), views as pure functions (`domain -> Screen`), services injected into handlers, a `User` principal for guards and menus, a purchase conversation, admin commands, and a reconciler worker that messages buyers. Only `main.py` knows all the layers.
 
-The order flow in `examples/shop/botapp/order_flow.py` shows the conversation features together: two entry points (a Buy button and a discoverable `/order <sku>` command with an `Arg[str]` argument), a `/skip` command scoped to one state, a single Cancel handler mounted on `ANY_STATE` that returns `CANCEL`, and `exclusive=True` so a new order abandons the caller's half-finished one.
+The order flow in `examples/shop/botapp/order_flow.py` shows the conversation features together: two entry points (a Buy button and a discoverable `/order <sku>` command with an `Arg[str]` argument), a `/skip` command scoped to one state, and a single Cancel handler mounted on `ANY_STATE` that returns `CANCEL`.
 
 ## Escape hatches
 

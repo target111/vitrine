@@ -173,14 +173,15 @@ def pick_conv(when=None) -> Conversation:
 
 
 def test_a_callback_handler_behind_a_conversation_entry_fails_the_build():
-    """Conversations come first in group 0, even when registered later."""
+    """Conversations come first in group 0, even when registered later, and
+    an entry is tried even while the caller is mid-run."""
     bot = make_bot()
 
     @bot.callback(PickCB)
     async def flat(): ...
 
     bot.conversation(pick_conv())
-    with pytest.raises(ConfigurationError, match="mid-conversation.*t_pick.start"):
+    with pytest.raises(ConfigurationError, match="never run.*t_pick.start"):
         bot.build()
 
 

@@ -1,9 +1,8 @@
 """Guided purchase conversation: Buy button -> quantity -> confirm.
 
 Two ways in -- the Buy button on a product, or /order <sku> typed directly --
-and both leave the flow in the same state. ``exclusive=True`` means starting
-one order abandons whatever half-finished order the caller still had open,
-instead of letting it swallow the next number they send.
+and both leave the flow in the same state. Using either while an order is
+half-finished starts over: the old order ends as CANCELLED.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ class OrderDraft:
     qty: int = 0
 
 
-order_flow = Conversation("order", OrderDraft, timeout=180, exclusive=True)
+order_flow = Conversation("order", OrderDraft, timeout=180)
 
 
 @order_flow.entry(callback=BuyCB)

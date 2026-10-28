@@ -54,11 +54,15 @@ Telegram menu, and given typed ``Arg[...]`` parameters like
 deep link starts the flow with what it needs. An entry that starts no run
 (bad arguments, a failed guard, a throttle, a bare Screen) leaves no trace.
 
-While a caller has a live run, its steps see that caller's updates before
-the bot's other message and callback handlers (reply-keyboard buttons, which
-are navigation, still come first). ``exclusive=True`` makes starting this
-conversation end the caller's other exclusive runs, after the new flow's
-first screen has gone out.
+A run belongs to one user in one chat, and a caller has at most one live run
+per chat. While it lives, its current state's steps see the caller's updates
+first -- before any entry point, and before the bot's other message and
+callback handlers (reply-keyboard buttons, which are navigation, still come
+first). An update the run doesn't take can still start a conversation:
+another one, or the same one again from the top. The new run replaces the old
+one after its first screen has gone out; the old run's exit hook gets
+CANCELLED, but a Screen it returns is dropped -- the new flow's screen is the
+answer to this update.
 """
 
 from __future__ import annotations
@@ -181,25 +185,14 @@ class Conversation:
         state_factory: Callable[[], Any] | None = None,
         *,
         timeout: float | None = None,
-        per_chat: bool = True,
-        per_user: bool = True,
-        exclusive: bool = False,
     ) -> None:
-        if not per_chat and not per_user:
-            raise ConfigurationError(
-                f"conversation {name!r}: per_chat and per_user can't both be False"
-            )
         self.name = name
         self.state_factory = state_factory
         self.timeout = timeout
-        self.per_chat = per_chat
-        self.per_user = per_user
-        #: end other exclusive runs for this caller when this one starts
-        self.exclusive = exclusive
         self.frozen = False
         self._steps: list[_Step] = []
         self._exit_hook: Callable[..., Awaitable[Any]] | None = None
-        self._handler: ConversationDispatcher | None = None
+        self._flow: _Flow | None = None
 
     def _check_mutable(self) -> None:
         if self.frozen:
@@ -323,21 +316,20 @@ class Conversation:
 
     # -- runtime inspection ------------------------------------------------------
 
-    def active(
-        self, *, chat_id: int | None = None, user_id: int | None = None
-    ) -> tuple[str, Any] | None:
-        """The live run for a caller as ``(state_name, state)``, or None."""
-        if self._handler is None:
+    def active(self, *, chat_id: int, user_id: int) -> tuple[str, Any] | None:
+        """The caller's live run in this conversation as ``(state_name, state)``."""
+        flow = self._flow
+        if flow is None or flow.dispatcher is None:
             return None
-        run = self._handler.runs.get(self._key_of(chat_id, user_id))
-        return (run.state_name, run.state) if run is not None else None
+        run = flow.dispatcher.runs.get((chat_id, user_id))
+        if run is None or run.flow is not flow:
+            return None
+        return run.state_name, run.state
 
     # -- building -------------------------------------------------------------
 
-    def build(
-        self, dispatch: Dispatch, middlewares: list[Middleware]
-    ) -> ConversationDispatcher:
-        """Compile into the single PTB handler that owns this conversation's runs."""
+    def build(self, dispatch: Dispatch, middlewares: list[Middleware]) -> _Flow:
+        """Compile into what the bot's ConversationDispatcher matches and runs."""
         state_names = list(
             dict.fromkeys(
                 name for step in self._steps for name in step.states if name != ANY_STATE
@@ -382,25 +374,21 @@ class Conversation:
             dispatch.validate(exit_reg, extra_names={"reason"})
 
         # A Conversation belongs to one bot: building again rebinds it.
-        self._handler = ConversationDispatcher(
-            self, dispatch, entries, states, fallbacks, exit_reg
-        )
-        return self._handler
+        self._flow = _Flow(self, entries, states, fallbacks, exit_reg)
+        return self._flow
 
-    def key(self, update: Any) -> tuple[int | None, int | None] | None:
-        """Whose run an update belongs to: (chat, user), per ``per_chat``/``per_user``."""
-        chat = getattr(update, "effective_chat", None)
-        user = getattr(update, "effective_user", None)
-        if self.per_chat and chat is None:
-            return None
-        if self.per_user and user is None:
-            return None
-        return self._key_of(getattr(chat, "id", None), getattr(user, "id", None))
 
-    def _key_of(
-        self, chat_id: int | None, user_id: int | None
-    ) -> tuple[int | None, int | None]:
-        return (chat_id if self.per_chat else None, user_id if self.per_user else None)
+def _key(update: Any) -> tuple[int, int] | None:
+    """Whose run an update belongs to: (chat, user)."""
+    chat = getattr(update, "effective_chat", None)
+    user = getattr(update, "effective_user", None)
+    if chat is None or user is None:
+        return None
+    return chat.id, user.id
+
+
+async def _ignore_result(result: Any) -> Any:
+    return result
 
 
 async def _unused_callback(update: Any, context: Any) -> None:
@@ -415,8 +403,22 @@ class _Mounted:
     handler: BaseHandler  # used for matching only
 
 
+@dataclass(eq=False)
+class _Flow:
+    """One conversation, compiled: its entries, each state's steps, its exit hook."""
+
+    conv: Conversation
+    entries: list[_Mounted]
+    states: dict[str, list[_Mounted]]
+    fallbacks: list[_Mounted]
+    exit_reg: Registration | None
+    #: the dispatcher running this flow, once the bot mounts it
+    dispatcher: ConversationDispatcher | None = None
+
+
 @dataclass
 class _Run:
+    flow: _Flow
     state_name: str
     state: Any
     update: Any  # the latest update, for a timeout's exit hook
@@ -425,58 +427,47 @@ class _Run:
 
 
 class ConversationDispatcher(BaseHandler[Update, Any, None]):
-    """The PTB handler owning one conversation's live runs.
+    """The one PTB handler running every conversation's live runs.
 
-    Without a live run for the caller only entry points match; with one, only
-    that state's steps and the fallbacks do.
+    A caller has at most one run per chat. Its current state's steps and its
+    cancel commands are tried first, then every conversation's entry points --
+    its own included, so re-entering restarts it.
     """
 
-    def __init__(
-        self,
-        conv: Conversation,
-        dispatch: Dispatch,
-        entries: list[_Mounted],
-        states: dict[str, list[_Mounted]],
-        fallbacks: list[_Mounted],
-        exit_reg: Registration | None,
-    ) -> None:
+    def __init__(self, dispatch: Dispatch, flows: list[_Flow]) -> None:
         super().__init__(_unused_callback)
-        self.conv = conv
         self.dispatch = dispatch
-        self.entries = entries
-        self.states = states
-        self.fallbacks = fallbacks
-        self.exit_reg = exit_reg
-        self.peers: list[ConversationDispatcher] = []
-        self.runs: dict[tuple[int | None, int | None], _Run] = {}
+        self.flows = flows
+        self.runs: dict[tuple[int, int], _Run] = {}
+        for flow in flows:
+            flow.dispatcher = self
 
     # -- PTB handler protocol ----------------------------------------------------
 
     def check_update(
         self, update: object
-    ) -> tuple[tuple[int | None, int | None], _Mounted, object] | None:
+    ) -> tuple[tuple[int, int], _Flow, _Mounted, object] | None:
         if not isinstance(update, Update):
             return None
         if update.channel_post or update.edited_channel_post:
             return None
-        if (
-            update.callback_query is not None
-            and self.conv.per_chat
-            and update.callback_query.message is None
-        ):
+        if update.callback_query is not None and update.callback_query.message is None:
             return None
-        key = self.conv.key(update)
+        key = _key(update)
         if key is None:
             return None
 
+        candidates: list[tuple[_Flow, _Mounted]] = []
         run = self.runs.get(key)
-        candidates = (
-            self.entries if run is None else [*self.states[run.state_name], *self.fallbacks]
-        )
-        for mounted in candidates:
+        if run is not None:
+            steps = [*run.flow.states[run.state_name], *run.flow.fallbacks]
+            candidates += [(run.flow, mounted) for mounted in steps]
+        candidates += [(flow, mounted) for flow in self.flows for mounted in flow.entries]
+
+        for flow, mounted in candidates:
             check = mounted.handler.check_update(update)
             if check is not None and check is not False:
-                return key, mounted, check
+                return key, flow, mounted, check
 
         return None
 
@@ -488,29 +479,31 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
         context: Any,
     ) -> None:
         assert isinstance(check_result, tuple)
-        key, mounted, inner_check = check_result
+        key, flow, mounted, inner_check = check_result
         # what the step's own PTB handler would add: context.args, regex matches
         mounted.handler.collect_additional_context(
             context, update, application, inner_check
         )
 
         if mounted.step.is_entry:
-            await self._enter(key, mounted, update, context)
+            await self._enter(key, flow, mounted, update, context)
         else:
-            await self._step(key, mounted, update, context)
+            await self._step(key, flow, mounted, update, context)
 
     # -- transitions -------------------------------------------------------------
 
     async def _enter(
         self,
-        key: tuple[int | None, int | None],
+        key: tuple[int, int],
+        flow: _Flow,
         mounted: _Mounted,
         update: Any,
         context: Any,
     ) -> None:
         # The state exists for the entry to fill, but nothing is recorded -- and
-        # peers are left alone -- until the result shows a run really started.
-        factory = self.conv.state_factory
+        # the caller's current run is left alone -- until the result shows a run
+        # really started.
+        factory = flow.conv.state_factory
         state = factory() if factory is not None else None
         # None too when a middleware answered without calling the step
         outcome = await self.dispatch.run(
@@ -518,33 +511,32 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
             update,
             context,
             state=state,
-            on_result=self._interpret(update),
+            on_result=self._interpret(flow, update),
         )
         if outcome is None:
             return
 
-        if self.conv.exclusive:
-            for peer in self.peers:
-                await peer.end_run(update, context)
+        await self._end_replaced(key, update, context)
 
         reason = _exit_reason(outcome)
         if reason is not None:
-            await self._exit(update, context, state, reason)
+            await self._exit(flow, update, context, state, reason)
             return
 
-        run = _Run(outcome, state, update, context)
+        run = _Run(flow, outcome, state, update, context)
         self.runs[key] = run
         self._arm(key, run)
 
     async def _step(
         self,
-        key: tuple[int | None, int | None],
+        key: tuple[int, int],
+        flow: _Flow,
         mounted: _Mounted,
         update: Any,
         context: Any,
     ) -> None:
         run = self.runs.get(key)
-        if run is None:  # timed out between matching and handling
+        if run is None or run.flow is not flow:  # ended between matching and handling
             return
         run.update, run.context = update, context
 
@@ -557,7 +549,7 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
                 update,
                 context,
                 state=run.state,
-                on_result=self._interpret(update),
+                on_result=self._interpret(flow, update),
             )
         except BaseException:
             if self.runs.get(key) is run:
@@ -569,14 +561,14 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
         reason = ExitReason.CANCELLED if mounted.step.is_fallback else _exit_reason(outcome)
         if reason is not None:
             self._forget(key)
-            await self._exit(update, context, run.state, reason)
+            await self._exit(flow, update, context, run.state, reason)
             return
 
         if outcome is not None:
             run.state_name = outcome
         self._arm(key, run)
 
-    def _interpret(self, update: Any) -> Callable[[Any], Awaitable[Any]]:
+    def _interpret(self, flow: _Flow, update: Any) -> Callable[[Any], Awaitable[Any]]:
         """Inside the pipeline: validate a step's result and render its screen."""
 
         async def interpret(result: Any) -> Any:
@@ -589,11 +581,11 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
             if (
                 outcome is not None
                 and _exit_reason(outcome) is None
-                and not (isinstance(outcome, str) and outcome in self.states)
+                and not (isinstance(outcome, str) and outcome in flow.states)
             ):
                 raise ConfigurationError(
-                    f"conversation {self.conv.name!r}: step returned unknown state "
-                    f"{outcome!r}; declared states are {list(self.states)}"
+                    f"conversation {flow.conv.name!r}: step returned unknown state "
+                    f"{outcome!r}; declared states are {list(flow.states)}"
                 )
             if screen is not None:
                 await self.dispatch.delivery.render(update, screen)
@@ -601,40 +593,51 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
 
         return interpret
 
-    async def end_run(self, update: Any, context: Any) -> bool:
-        """Cancel the caller's live run, if any; its exit hook gets CANCELLED."""
-        key = self.conv.key(update)
-        run = self.runs.get(key) if key is not None else None
-        if run is None:
-            return False
+    async def _end_replaced(self, key: tuple[int, int], update: Any, context: Any) -> None:
+        """Cancel the caller's run that a new one replaces, in any conversation.
 
-        assert key is not None
+        Its exit hook gets CANCELLED, but a Screen it returns is dropped: the
+        update already got the new flow's first screen.
+        """
+        run = self.runs.get(key)
+        if run is None:
+            return
+
         self._forget(key)
-        await self._exit(update, context, run.state, ExitReason.CANCELLED)
-        return True
+        await self._exit(
+            run.flow, update, context, run.state, ExitReason.CANCELLED, render=False
+        )
 
     async def _exit(
-        self, update: Any, context: Any, state: Any, reason: ExitReason
+        self,
+        flow: _Flow,
+        update: Any,
+        context: Any,
+        state: Any,
+        reason: ExitReason,
+        *,
+        render: bool = True,
     ) -> None:
-        if self.exit_reg is None:
+        if flow.exit_reg is None:
             return
         await self.dispatch.run(
-            self.exit_reg,
+            flow.exit_reg,
             update,
             context,
             state=state,
             extras={"reason": reason},
+            on_result=None if render else _ignore_result,
             answer_query=False,
         )
 
     # -- timeouts ----------------------------------------------------------------
 
-    def _arm(self, key: tuple[int | None, int | None], run: _Run) -> None:
+    def _arm(self, key: tuple[int, int], run: _Run) -> None:
         """(Re)start the run's inactivity timer; any handled update resets it."""
         self._disarm(run)
-        if self.conv.timeout is not None:
+        if run.flow.conv.timeout is not None:
             run.timer = asyncio.get_running_loop().create_task(
-                self._expire(key, run), name=f"vitrine-conv-timeout-{self.conv.name}"
+                self._expire(key, run), name=f"vitrine-conv-timeout-{run.flow.conv.name}"
             )
 
     @staticmethod
@@ -643,16 +646,17 @@ class ConversationDispatcher(BaseHandler[Update, Any, None]):
             run.timer.cancel()
             run.timer = None
 
-    async def _expire(self, key: tuple[int | None, int | None], run: _Run) -> None:
-        assert self.conv.timeout is not None
-        await asyncio.sleep(self.conv.timeout)
+    async def _expire(self, key: tuple[int, int], run: _Run) -> None:
+        timeout = run.flow.conv.timeout
+        assert timeout is not None
+        await asyncio.sleep(timeout)
         if self.runs.get(key) is not run:
             return
         run.timer = None  # this task is the timer: don't cancel it
         del self.runs[key]
-        await self._exit(run.update, run.context, run.state, ExitReason.TIMEOUT)
+        await self._exit(run.flow, run.update, run.context, run.state, ExitReason.TIMEOUT)
 
-    def _forget(self, key: tuple[int | None, int | None]) -> None:
+    def _forget(self, key: tuple[int, int]) -> None:
         run = self.runs.pop(key, None)
         if run is not None and run.timer is not None:
             run.timer.cancel()
